@@ -17,6 +17,8 @@ export interface OrganizeProgress {
 }
 
 export interface OrganizerApi {
+  /** 把拖进来的 File 换成磁盘路径（预加载脚本里用 webUtils.getPathForFile）；取不到给 null */
+  pathForFile(file: File): string | null;
   pickFiles(): Promise<string[]>;
   pickOutputDir(): Promise<string | null>;
   exists(filePaths: string[]): Promise<Record<string, boolean>>;

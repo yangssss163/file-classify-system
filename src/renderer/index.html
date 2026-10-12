@@ -45,6 +45,8 @@
   <h2>总结</h2>
   <p id="summary" class="summary">整理完成：成功 0 个，失败 0 个</p>
 
-  <script src="renderer.js"></script>
+  <!-- renderer.js 以 ES module 加载：编译产物里没有 CommonJS 的 exports 包装，
+     所以不会有 "exports is not defined" 这种启动即崩的问题 -->
+<script type="module" src="renderer.js"></script>
 </body>
 </html>

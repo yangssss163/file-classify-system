@@ -5,11 +5,14 @@
   "description": "文件批量整理器（Windows 桌面 / Electron）：拖入文件 → 按后缀分类 → 只复制不移动",
   "main": "out/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('out',{recursive:true,force:true});require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prebuild": "npm run clean",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.renderer.json && node scripts/copy-assets.mjs",
     "prepare": "npm run build",
     "prestart": "npm run build",
     "start": "node scripts/start-electron.mjs",
     "start:headless": "node scripts/start-electron.mjs --no-window",
+    "验收:拖入取路径": "node --experimental-vm-modules scripts/accept-drop-path-test.js",
     "验收": "npm run build && powershell -ExecutionPolicy Bypass -File scripts\\验收.ps1"
   },
   "devDependencies": {

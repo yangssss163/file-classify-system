@@ -2,8 +2,14 @@
  * 界面逻辑：只管拖拽 / 按钮 / 显示，分类与复制都在 core 里、由主进程调用。
  * 全程不阻塞：复制是异步的，进程里逐个回报进度。
  */
-import type { OrganizeProgress } from '../shared';
-import type { PreviewOutcome, PreviewTree } from '../core/preview';
+import type { OrganizeProgress, OrganizerApi, PreviewOutcome, PreviewTree } from './api-types';
+
+declare global {
+  interface Window {
+    /** 由预加载脚本通过 contextBridge 注入（preload.ts） */
+    organizer: OrganizerApi;
+  }
+}
 
 const api = window.organizer;
 
@@ -75,7 +81,11 @@ function mergeFiles(incoming: string[]): { added: string[]; duplicates: number }
   return { added, duplicates };
 }
 
-async function acceptPaths(paths: string[], sourceLabel: string): Promise<void> {
+async function acceptPaths(
+  paths: string[],
+  sourceLabel: string,
+  extraHint = '',
+): Promise<void> {
   if (paths.length === 0) return;
   let isFileMap: Record<string, boolean> = {};
   try {
@@ -102,6 +112,7 @@ async function acceptPaths(paths: string[], sourceLabel: string): Promise<void> 
   if (folders > 0) msgs.push(`暂不支持文件夹，已忽略 ${folders} 个文件夹`);
   if (missing.length > 0) msgs.push(`${missing.length} 个路径已失效，已忽略`);
   if (duplicates > 0) msgs.push(`${duplicates} 个重复文件已跳过`);
+  if (extraHint) msgs.push(extraHint);
   notice(msgs.length > 0 ? msgs.join('；') : '没有可用的文件');
 }
 
@@ -240,20 +251,41 @@ function invalidatePreview(): void {
 window.addEventListener('dragover', (ev) => ev.preventDefault());
 window.addEventListener('drop', (ev) => ev.preventDefault());
 
-el.drop.addEventListener('drop', (ev) => {
-  const dt = ev.dataTransfer;
-  if (!dt) return;
-  const paths: string[] = [];
-  for (const file of Array.from(dt.files)) {
-    const anyFile = file as File & { path?: string };
-    if (typeof anyFile.path === 'string' && anyFile.path.length > 0) paths.push(anyFile.path);
-  }
-  if (paths.length === 0) {
-    notice('没拿到文件路径，请改用「选择文件」按钮');
-    return;
-  }
-  void acceptPaths(paths, '拖入');
-});
+/**
+ * 把拖进来的文件交给名单。
+ * 路径只能由预加载脚本里的 webUtils.getPathForFile 取（File.path 在 Electron 32 起已被移除，44 上完全没有），
+ * 所以这里一律调 api.pathForFile，且不许留「先试 File.path」的后路。
+ * 取不到路径不许静默：必须给人一句人话提示。
+ */
+function createDropHandler(): (ev: DragEvent) => void {
+  return (ev: DragEvent): void => {
+    const dt = ev.dataTransfer;
+    if (!dt || dt.files.length === 0) {
+      notice('这次拖入没有拿到文件，请改用「选择文件」按钮');
+      return;
+    }
+
+    const paths: string[] = [];
+    let unreadable = 0;
+    for (const file of Array.from(dt.files)) {
+      const p = api.pathForFile(file);
+      if (typeof p === 'string' && p.length > 0) paths.push(p);
+      else unreadable++;
+    }
+
+    if (paths.length === 0) {
+      notice('读不到这个文件的路径，请改用「选择文件」按钮');
+      return;
+    }
+
+    // 文件夹在当前 Electron 版本下拿不到可用路径：忽略它，但不能让整次拖入失败。
+    // 数量对不上就说明有拿不到路径的（拖的是文件夹，或系统暂时给不出路径）。
+    const unreadableHint = unreadable > 0 ? `暂不支持文件夹，已忽略 ${unreadable} 个` : '';
+    void acceptPaths(paths, '拖入', unreadableHint);
+  };
+}
+
+el.drop.addEventListener('drop', createDropHandler());
 
 /* ---------------- 按钮 ---------------- */
 
