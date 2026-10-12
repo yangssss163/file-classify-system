@@ -1,4 +1,4 @@
-# 验收：文件批量整理器（本片）
+﻿# 验收：文件批量整理器（本片）
 # 标准由控制台写死，工作台只执行，不修改、不放宽。
 # 跑法：npm run 验收   （= powershell -ExecutionPolicy Bypass -File scripts\验收.ps1）
 
