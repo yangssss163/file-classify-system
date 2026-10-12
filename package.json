@@ -1,0 +1,16 @@
+{
+  "name": "file-organizer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "文件批量整理器（Windows 桌面 / Electron）：拖入文件 → 按后缀分类 → 只复制不移动",
+  "main": "out/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "start": "electron .",
+    "验收": "powershell -ExecutionPolicy Bypass -File scripts\\验收.ps1"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "typescript": "5.9.3"
+  }
+}

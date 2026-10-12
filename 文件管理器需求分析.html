@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文件管理器 — 需求分析文档</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232563eb'/%3E%3Cpath d='M16 22c0-3.3 2.7-6 6-6h8l4 5h14c3.3 0 6 2.7 6 6v15c0 3.3-2.7 6-6 6H22c-3.3 0-6-2.7-6-6V22z' fill='white'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --ink:#1f2933; --sub:#5b6673; --line:#e4e8ee; --bg:#f6f7f9; --card:#ffffff;
+    --accent:#2563eb; --accent-soft:#eff4ff; --green:#059669; --amber:#d97706; --red:#dc2626;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:var(--ink);background:var(--bg);line-height:1.7}
+  .wrap{max-width:1060px;margin:0 auto;padding:40px 24px 80px}
+  header.hero{background:linear-gradient(135deg,#1e3a8a,#2563eb 60%,#3b82f6);color:#fff;border-radius:16px;padding:36px 40px;margin-bottom:28px}
+  header.hero h1{margin:0 0 6px;font-size:30px;letter-spacing:.5px}
+  header.hero .meta{display:flex;flex-wrap:wrap;gap:8px 20px;opacity:.92;font-size:14px;margin-top:14px}
+  header.hero .badge{background:rgba(255,255,255,.18);padding:3px 12px;border-radius:999px}
+  h2.section{font-size:22px;margin:44px 0 6px;display:flex;align-items:center;gap:10px}
+  h2.section::before{content:"";width:6px;height:24px;background:var(--accent);border-radius:3px}
+  .lead{color:var(--sub);font-size:14px;margin:0 0 18px}
+  .grid{display:grid;gap:16px}
+  .grid.two{grid-template-columns:1fr 1fr}
+  .grid.three{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:760px){.grid.two,.grid.three{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px}
+  .card h3{margin:0 0 12px;font-size:16px;color:var(--accent)}
+  .card h3 .tag{display:inline-block;font-size:12px;color:var(--sub);font-weight:400;margin-left:8px}
+  ul.clean{margin:0;padding:0;list-style:none}
+  ul.clean li{padding:6px 0 6px 22px;position:relative;border-bottom:1px dashed var(--line)}
+  ul.clean li:last-child{border-bottom:none}
+  ul.clean li::before{content:"";position:absolute;left:4px;top:16px;width:7px;height:7px;border-radius:2px;background:var(--accent)}
+  .req-type{display:inline-block;font-size:11px;font-weight:600;border-radius:4px;padding:0 7px;margin-right:6px;vertical-align:2px}
+  .t-f{background:var(--accent-soft);color:var(--accent)}
+  .t-n{background:#f0fdf4;color:var(--green)}
+  .diagram-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:20px}
+  .diagram-card .d-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+  .diagram-card h3{margin:0;font-size:17px}
+  .diagram-card .d-note{font-size:13px;color:var(--sub)}
+  .btn-copy{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:6px 16px;font-size:13px;cursor:pointer}
+  .btn-copy:hover{background:#1d4ed8}
+  .btn-copy.copied{background:var(--green)}
+  .mermaid{display:flex;justify-content:center;overflow-x:auto;background:#fbfcfe;border-radius:8px;padding:12px;border:1px dashed var(--line)}
+  .mermaid svg{max-width:100%;height:auto}
+  .codeblock{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:14px 16px;font-size:12.5px;overflow-x:auto;white-space:pre;line-height:1.6;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;max-height:280px;overflow-y:auto;margin:12px 0 4px}
+  details{margin-top:6px}
+  summary{cursor:pointer;color:var(--accent);font-size:13px;user-select:none}
+  .legend{font-size:13px;color:var(--sub);background:#fbfcfe;border:1px dashed var(--line);border-radius:10px;padding:10px 16px;margin-top:10px}
+  .legend b{color:var(--ink)}
+  table{width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:#f1f4f9;color:var(--accent);font-weight:600}
+  .pill{display:inline-block;background:var(--accent-soft);color:var(--accent);border-radius:6px;padding:1px 8px;font-size:12px;margin:2px}
+  .boundary{background:#fff7ed;border:1px solid #fbd7a8;border-radius:12px;padding:16px 20px;margin-top:20px;font-size:14px}
+  .boundary h3{color:var(--amber);margin:0 0 8px}
+  footer{color:var(--sub);font-size:13px;text-align:center;margin-top:48px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <h1>文件批量整理器 · 需求分析</h1>
+    <p style="margin:0;opacity:.9">用户拖入 → 批量整理 → 输出分类文件夹</p>
+    <div class="meta">
+      <span class="badge">视角：用户 + 开发者</span>
+      <span class="badge">面向数据：DFD</span>
+      <span class="badge">面向对象：OOA</span>
+      <span class="badge">可视化建模：Mermaid</span>
+    </div>
+  </header>
+
+  <!-- ===== 一、需求总览 ===== -->
+  <h2 class="section">一、需求总览</h2>
+  <p class="lead">产品目标：接收用户拖入的文件/文件夹，按规则自动分类，生成对应分类目录并归类文件。全程遵循需求工程方法，从开发者与用户双视角分析。</p>
+  <div class="grid two">
+    <div class="card">
+      <h3>用户视角 <span class="tag">体验 / 行为</span></h3>
+      <ul class="clean">
+        <li>拖拽导入文件，无需手敲路径</li>
+        <li>可视化配置分类规则，先预览后执行</li>
+        <li>不误删原文件，可回退</li>
+        <li>结果与异常清晰可见</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>开发者视角 <span class="tag">架构 / 实现</span></h3>
+      <ul class="clean">
+        <li>模块解耦：采集 / 规则 / 目录 / 文件操作独立</li>
+        <li>元数据驱动分类，不解析文件内容</li>
+        <li>权限与 IO 异常分级处理</li>
+        <li>预览与执行分离，磁盘操作可控</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ===== 二、详细需求 ===== -->
+  <h2 class="section">二、详细需求</h2>
+  <p class="lead">功能性需求（F）与非功能性需求（N）双表呈现。</p>
+
+  <div class="card" style="padding:6px 22px">
+    <h3 style="margin-top:14px">2.1 功能性需求（用户视角可感知的能力）</h3>
+    <table>
+      <colgroup><col style="width:9%"><col style="width:46%"><col style="width:45%"></colgroup>
+      <tr><th>编号</th><th>需求描述</th><th>验收要点</th></tr>
+      <tr><td><span class="pill">F1</span></td><td>支持拖拽批量导入本地文件或文件夹</td><td>一次可拖入 ≥100 个文件，提示不可拖入的类型</td></tr>
+      <tr><td><span class="pill">F2</span></td><td>支持按后缀 / 创建时间 / 文件大小等维度配置分类规则</td><td>规则可视化勾选，可多维度组合</td></tr>
+      <tr><td><span class="pill">F3</span></td><td>一键批量整理，自动创建分类文件夹</td><td>目录不存在时自动递归创建</td></tr>
+      <tr><td><span class="pill">F4</span></td><td>执行前可视化预览分类结构，不落盘</td><td>预览为内存模拟，不写磁盘</td></tr>
+      <tr><td><span class="pill">F5</span></td><td>支持复制 / 移动两种操作模式（默认复制）</td><td>移动模式二次确认</td></tr>
+      <tr><td><span class="pill">F6</span></td><td>输出操作日志与异常文件清单</td><td>记录成功数量、失败原因、文件路径</td></tr>
+      <tr><td><span class="pill">F7</span></td><td>可自定义输出根目录并保存/加载规则配置</td><td>配置持久化，下次可复用</td></tr>
+    </table>
+
+    <h3 style="margin-top:26px">2.2 非功能性需求（开发者视角的质量约束）</h3>
+    <table>
+      <colgroup><col style="width:9%"><col style="width:46%"><col style="width:45%"></colgroup>
+      <tr><th>编号</th><th>需求描述</th><th>验收要点</th></tr>
+      <tr><td><span class="pill">N1</span></td><td>安全：默认不删除原文件，操作前校验权限</td><td>复制失败不残留半成品，提供回退路径</td></tr>
+      <tr><td><span class="pill">N2</span></td><td>性能：大文件不阻塞 UI</td><td>异步处理 + 进度反馈，千级文件可用</td></tr>
+      <tr><td><span class="pill">N3</span></td><td>易用：拖拽即用，可视化分类树预览</td><td>无命令行依赖，首屏 3 步可达</td></tr>
+      <tr><td><span class="pill">N4</span></td><td>容错：跳过占用/损坏/无权限文件，不崩溃</td><td>异常记录入日志，单文件失败不影响整体</td></tr>
+    </table>
+  </div>
+
+  <!-- ===== 三、面向数据 DFD ===== -->
+  <h2 class="section">三、面向数据建模 · DFD 数据流图</h2>
+  <p class="lead">采用 Yourdon 符号：矩形=外部实体，圆角矩形=处理，平行线=数据存储，箭头=数据流。</p>
+
+  <div class="diagram-card">
+    <div class="d-head"><h3>3.1 DFD 0 层（上下文图）</h3><button class="btn-copy" onclick="copyMermaid('dfd0')">复制源码</button></div>
+    <p class="d-note">整体系统与唯一外部实体「用户」之间的数据交互。</p>
+    <div class="mermaid" id="dfd0">
+flowchart LR
+  U(["用户"])
+  S(["文件批量整理系统"])
+  D1[("分类规则配置")]
+  D2[("操作日志")]
+
+  U -- 拖拽文件集合 --> S
+  U -- 分类规则参数 --> S
+  S -- 预览分类结果 --> U
+  U -- 确认执行指令 --> S
+  S -- 整理完成结果/异常报告 --> U
+
+  S <--> D1
+  S --> D2
+    </div>
+  </div>
+
+  <div class="diagram-card">
+    <div class="d-head"><h3>3.2 DFD 1 层（功能分解）</h3><button class="btn-copy" onclick="copyMermaid('dfd1')">复制源码</button></div>
+    <p class="d-note">将系统拆分为 4 个子处理过程，数据在过程与存储间流动。</p>
+    <div class="mermaid" id="dfd1">
+flowchart LR
+  U(["用户"])
+  P1(["P1 采集文件与\n提取元数据"])
+  P2(["P2 分类计算\n(预览)"])
+  P3(["P3 创建分类目录"])
+  P4(["P4 执行复制/移动\n+日志"])
+  D1[("D1 规则配置")]
+  D2[("D2 操作日志")]
+
+  U -- 拖拽文件 --> P1
+  P1 -- 文件元数据列表 --> P2
+  U -- 分类规则 --> P2
+  P2 <--> D1
+  P2 -- 文件-目录映射表 --> P3
+  P3 -- 目录创建结果 --> P4
+  P4 -- 操作结果/异常清单 --> U
+  P4 --> D2
+    </div>
+    <div class="legend"><b>数据流说明：</b> P1 输出文件元数据（名/后缀/大小/时间/原路径）→ P2 按规则产出「文件-目标目录」映射 → P3 校验并批量建目录 → P4 执行文件操作并落日志。</div>
+  </div>
+
+  <!-- ===== 四、面向对象 OOA ===== -->
+  <h2 class="section">四、面向对象需求分析（OOA）</h2>
+  <p class="lead">识别核心类、职责与关系，用类图、用例图表达。</p>
+
+  <div class="diagram-card">
+    <div class="d-head"><h3>4.1 类图（核心类与关联）</h3><button class="btn-copy" onclick="copyMermaid('ooa')">复制源码</button></div>
+    <div class="mermaid" id="ooa">
+classDiagram
+  class User{
+    -rules: List~ClassifyRule~
+    +dragFiles()
+    +preview()
+    +execute()
+  }
+  class FileCollector{
+    +collect(files): List~FileMeta~
+  }
+  class FileMeta{
+    -path : String
+    -name : String
+    -ext : String
+    -size : long
+    -mtime : Date
+    +classifyKey(): String
+  }
+  class ClassifyRule{
+    -dimension : String
+    -outputRoot : String
+    -mode : String
+    +getTargetDir(): String
+  }
+  class ClassifyService{
+    +buildPreview(metas, rule): PreviewTree
+  }
+  class DirCreator{
+    +ensureDirs(paths): List~String~
+  }
+  class FileOperator{
+    +copy(meta, target): Result
+    +move(meta, target): Result
+  }
+  class OperationLog{
+    -records : List~LogItem~
+    +write(meta, status)
+    +failures(): List~LogItem~
+  }
+  class PreviewTree{
+    -nodes : Tree
+  }
+
+  User --> ClassifyRule : 配置
+  User --> FileCollector : 调用
+  FileCollector --> FileMeta : 生成
+  ClassifyService --> FileMeta : 读取
+  ClassifyService --> ClassifyRule : 应用
+  ClassifyService --> PreviewTree : 产出
+  ClassifyService --> DirCreator : 调用
+  ClassifyService --> FileOperator : 调用
+  FileOperator --> OperationLog : 写入
+    </div>
+  </div>
+
+  <div class="diagram-card">
+    <div class="d-head"><h3>4.2 用例图</h3><button class="btn-copy" onclick="copyMermaid('uc')">复制源码</button></div>
+    <div class="mermaid" id="uc">
+usecaseDiagram
+  actor 用户
+  用户 --> (拖拽导入文件)
+  用户 --> (设置分类规则)
+  用户 --> (预览分类效果)
+  用户 --> (执行批量整理)
+  用户 --> (查看操作日志)
+  用户 --> (保存/加载规则)
+    </div>
+  </div>
+
+  <!-- ===== 五、业务流程图 ===== -->
+  <h2 class="section">五、业务活动流程图</h2>
+  <p class="lead">端到端的主流程，含预览回退与异常处理分支。</p>
+  <div class="diagram-card">
+    <div class="d-head"><h3>5.1 批量整理主流程</h3><button class="btn-copy" onclick="copyMermaid('flow')">复制源码</button></div>
+    <div class="mermaid" id="flow">
+flowchart TD
+  A([开始]) --> B[用户拖拽文件到窗口]
+  B --> C[系统读取全部文件元信息]
+  C --> D[用户配置分类规则·输出目录·复制/移动]
+  D --> E[系统计算分类结构,生成预览树]
+  E --> F{用户确认执行?}
+  F -- 否 --> Z([结束:仅预览,不改磁盘])
+  F -- 是 --> G[校验权限]
+  G --> H[批量创建所有目标分类文件夹]
+  H --> I[循环处理每个文件]
+  I --> J{复制/移动成功?}
+  J -- 是 --> K[标记成功]
+  J -- 否 --> L[捕获异常,加入失败清单]
+  K --> M[下一个文件]
+  L --> M
+  M --> I
+  I --> N[生成操作日志]
+  N --> O[返回整理报告:成功数+失败清单]
+  O --> Z
+    </div>
+  </div>
+
+  <!-- ===== 六、边界与说明 ===== -->
+  <div class="boundary">
+    <h3>六、需求边界与假设</h3>
+    <ul class="clean" style="margin:0">
+      <li>本系统<strong>不做文件内容识别</strong>，仅基于文件元信息分类；按内容分类属扩展需求。</li>
+      <li>预览阶段全部在内存运算，不修改本地磁盘；执行前可回退。</li>
+      <li>移动操作存在文件丢失风险，默认推荐复制模式，移动需二次确认。</li>
+      <li>上述 DFD、类图、用例图、流程图为 Mermaid 源码，可复制到 Typora / VS Code / mermaid.live 等工具渲染。</li>
+    </ul>
+  </div>
+
+  <footer>文件管理器 · 需求工程需求分析文档（用户视角 + 开发者视角 · DFD + OOA + 可视化建模）</footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="loadMermaidFallback()"></script>
+<script>
+  function loadMermaidFallback(){
+    var s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js';
+    s.onload=function(){initMermaid();runMermaid();};
+    document.head.appendChild(s);
+  }
+  function initMermaid(){
+    if(window.mermaid){ mermaid.initialize({theme:'neutral', securityLevel:'loose'}); }
+  }
+  function runMermaid(){
+    if(window.mermaid && document.querySelectorAll('.mermaid').length){
+      mermaid.run();
+    }
+  }
+  initMermaid();
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded', runMermaid);
+  } else {
+    runMermaid();
+  }
+
+  function copyMermaid(id){
+    const el = document.getElementById(id);
+    const code = el.textContent.trim();
+    navigator.clipboard.writeText(code).then(()=>{
+      const btn = el.parentElement.querySelector('.btn-copy');
+      btn.textContent = '已复制'; btn.classList.add('copied');
+      setTimeout(()=>{btn.textContent='复制源码';btn.classList.remove('copied');},1600);
+    });
+  }
+</script>
+</body>
+</html>

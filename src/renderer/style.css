@@ -1,0 +1,28 @@
+body {
+  font-family: "Microsoft YaHei", system-ui, sans-serif;
+  margin: 16px;
+  color: #1f2933;
+  font-size: 14px;
+}
+h1 { font-size: 20px; margin: 0 0 6px; }
+h2 { font-size: 15px; margin: 18px 0 6px; color: #2563eb; }
+.safety { color: #b45309; background: #fff7ed; border: 1px solid #fbd7a8; padding: 6px 10px; border-radius: 6px; }
+.drop {
+  border: 2px dashed #9aa5b1;
+  border-radius: 8px;
+  padding: 26px;
+  text-align: center;
+  color: #52606d;
+  margin: 12px 0;
+}
+.drop.over { border-color: #2563eb; background: #eff4ff; color: #2563eb; }
+.hint { font-size: 12px; color: #7b8794; }
+.row { margin: 8px 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+button { font-size: 14px; padding: 5px 12px; }
+button.primary { font-weight: 600; }
+.list { max-height: 220px; overflow: auto; border: 1px solid #e4e8ee; border-radius: 6px; padding: 6px 10px; }
+.list .item { padding: 2px 0; border-bottom: 1px dashed #eef1f5; }
+.ok { color: #059669; }
+.fail { color: #dc2626; }
+.notice { color: #b45309; min-height: 18px; }
+.summary { font-weight: 600; }

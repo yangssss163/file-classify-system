@@ -1,0 +1,26 @@
+# --- 控制台指定的忽略项 ---
+node_modules/
+dist/
+out/
+?*
+
+# --- 但上面那条 `?*` 会把所有单字符以上名字的文件也一起吞掉，
+# --- 所以下面按「最后匹配为准」把本仓库真正要提交的东西再放进来 ---
+!.gitignore
+!.npmrc
+!package.json
+!package-lock.json
+!tsconfig.json
+!src/
+!src/**
+!scripts/
+!scripts/**
+!文件管理器需求分析.html
+
+# --- 工作台自己加的工作区 ---
+artifacts/
+.dsh-staging/
+.electron-cache/
+.electron-builder-cache/
+.npm-cache/
+*.log
