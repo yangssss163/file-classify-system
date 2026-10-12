@@ -22,7 +22,7 @@ function Fail([string]$why) {
 # ---------- 第 1 条：纯逻辑测试（不需要界面） ----------
 $logic = $false
 try {
-  Write-Step '--- 1/3 纯逻辑测试 ---'
+  Write-Step '--- 1/4 纯逻辑测试 ---'
   $outDir = Join-Path $projectRoot 'out'
   New-Item -ItemType Directory -Force -Path $outDir | Out-Null
   $logicTestJs = Join-Path $stage 'accept-logic-test.js'
@@ -43,7 +43,7 @@ try {
 # ---------- 第 2 条：真实复制测试（不需要界面） ----------
 $copy = $false
 try {
-  Write-Step '--- 2/3 真实复制测试 ---'
+  Write-Step '--- 2/4 真实复制测试 ---'
   $caseDir = Join-Path $stage "accept-copy-$stamp"
   $srcDir = Join-Path $caseDir 'src'
   $dstDir = Join-Path $caseDir 'dst'
@@ -80,7 +80,7 @@ try {
 $alive = $false
 $elProc = $null
 try {
-  Write-Step '--- 3/3 真程序活着 ---'
+  Write-Step '--- 3/4 真程序活着 ---'
   $buildLog = Join-Path $stage 'accept-build.log'
   $nodeExe = (Get-Command node).Source
   # 用 node 直接跑 npm-cli.js，避开 npm.cmd 的批处理壳子（壳子会把 stderr 当成本命令失败）
@@ -151,7 +151,43 @@ try {
   }
 }
 
-if ($logic -and $copy -and $alive) {
+# ---------- 第 4 条：预览不落盘（不需要界面） ----------
+$preview = $false
+try {
+  Write-Step '--- 4/4 预览不落盘 ---'
+  $previewCase = Join-Path $stage "accept-preview-$stamp"
+  $previewSrc = Join-Path $previewCase 'src'
+  $previewOut = Join-Path $previewCase 'out-empty'
+  New-Item -ItemType Directory -Force -Path $previewSrc | Out-Null
+  New-Item -ItemType Directory -Force -Path $previewOut | Out-Null
+
+  # 9 个空文件：五类后缀 + 一个无后缀文件
+  $previewNames = @('p1.jpg', 'p2.pdf', 'p3.mp3', 'p4.zip', 'p5.xyz', 'noext', 'p6.JPG', 'p7.docx', 'p8.mp4')
+  foreach ($n in $previewNames) {
+    $p = Join-Path $previewSrc $n
+    [System.IO.File]::WriteAllText($p, '', (New-Object System.Text.UTF8Encoding($false)))
+  }
+  $previewFiles = @()
+  foreach ($n in $previewNames) { $previewFiles += (Join-Path $previewSrc $n) }
+
+  $previewTestJs = Join-Path $stage 'accept-preview-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-preview-test.js') -Destination $previewTestJs -Force
+  $previewLog = Join-Path $stage 'accept-preview.log'
+  $b64Preview = @($previewFiles | ForEach-Object { [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($_)) })
+  $previewArgs = @($previewTestJs, $outDir, $previewOut) + $b64Preview
+  & node @previewArgs *> $previewLog
+  $previewCode = $LASTEXITCODE
+  Get-Content -LiteralPath $previewLog -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "预览测试退出码=$previewCode  日志=$previewLog"
+  if ($previewCode -eq 0 -and ((Get-Content -LiteralPath $previewLog -Raw) -match '预览不落盘OK')) {
+    Write-Step '预览不落盘OK'
+    $preview = $true
+  }
+} catch {
+  Write-Host "预览测试异常：$($_.Exception.Message)"
+}
+
+if ($logic -and $copy -and $alive -and $preview) {
   Write-Step '验收通过'
   exit 0
 }
@@ -160,4 +196,5 @@ $failedSteps = @()
 if (-not $logic) { $failedSteps += '纯逻辑测试' }
 if (-not $copy) { $failedSteps += '真实复制测试' }
 if (-not $alive) { $failedSteps += '真程序活着' }
+if (-not $preview) { $failedSteps += '预览不落盘' }
 Fail ($failedSteps -join '+')

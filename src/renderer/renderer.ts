@@ -3,6 +3,7 @@
  * 全程不阻塞：复制是异步的，进程里逐个回报进度。
  */
 import type { OrganizeProgress } from '../shared';
+import type { PreviewOutcome, PreviewTree } from '../core/preview';
 
 const api = window.organizer;
 
@@ -13,6 +14,10 @@ const el = {
   fileCount: document.getElementById('file-count') as HTMLSpanElement,
   pickOut: document.getElementById('pick-out') as HTMLButtonElement,
   outDir: document.getElementById('out-dir') as HTMLSpanElement,
+  preview: document.getElementById('preview') as HTMLButtonElement,
+  previewWarning: document.getElementById('preview-warning') as HTMLParagraphElement,
+  previewSummary: document.getElementById('preview-summary') as HTMLParagraphElement,
+  previewTree: document.getElementById('preview-tree') as HTMLDivElement,
   start: document.getElementById('start') as HTMLButtonElement,
   progress: document.getElementById('progress') as HTMLSpanElement,
   openOut: document.getElementById('open-out') as HTMLButtonElement,
@@ -20,6 +25,12 @@ const el = {
   list: document.getElementById('file-list') as HTMLDivElement,
   summary: document.getElementById('summary') as HTMLParagraphElement,
 };
+
+/**
+ * 预览区上方那句话：一眼看出「这是预览，还没动你的文件」。
+ * 只有真的看到了预览树才显示。
+ */
+const PREVIEW_WARNING = '以下是预览，还没有复制任何文件：原文件、输出文件夹都保持原样。';
 
 let selectedFiles: string[] = [];
 let outputDir: string | null = null;
@@ -84,6 +95,7 @@ async function acceptPaths(paths: string[], sourceLabel: string): Promise<void> 
 
   const { added, duplicates } = mergeFiles(files);
   refreshCounts();
+  if (added.length > 0) invalidatePreview();
 
   const msgs: string[] = [];
   if (added.length > 0) msgs.push(`${sourceLabel}加入 ${added.length} 个文件`);
@@ -91,6 +103,121 @@ async function acceptPaths(paths: string[], sourceLabel: string): Promise<void> 
   if (missing.length > 0) msgs.push(`${missing.length} 个路径已失效，已忽略`);
   if (duplicates > 0) msgs.push(`${duplicates} 个重复文件已跳过`);
   notice(msgs.length > 0 ? msgs.join('；') : '没有可用的文件');
+}
+
+/* ---------------- 预览（纯内存，绝不写盘） ---------------- */
+
+/** 文件名在预览里的显示：名字 + 后缀读不到时的原因。 */
+function fileLine(f: PreviewTree['files'][number]): HTMLDivElement {
+  const line = document.createElement('div');
+  line.className = f.error ? 'file file-error' : 'file';
+  line.textContent =
+    f.name + (f.error ? `  —— ${f.error.message}（仍会归到 ${f.folder}）` : '');
+  return line;
+}
+
+/**
+ * 画预览树：每个分类一行（分类名 + 文件数），点一下展开看具体文件名。
+ * 只往内存里的 DOM 写，不碰磁盘。
+ */
+function renderPreviewTree(tree: PreviewTree): void {
+  el.previewTree.textContent = '';
+  for (const group of tree.folders) {
+    const box = document.createElement('div');
+    box.className = group.files.length > 0 ? 'folder' : 'folder hidden';
+
+    const head = document.createElement('div');
+    head.className = 'folder-head';
+    head.textContent = `${group.files.length > 0 ? '▸' : '·'} ${group.folder}　`;
+    const count = document.createElement('span');
+    count.className = 'folder-count';
+    count.textContent = `${group.count} 个文件`;
+    head.appendChild(count);
+
+    const files = document.createElement('div');
+    files.className = 'files';
+    files.style.display = 'none';
+
+    if (group.files.length === 0) {
+      const none = document.createElement('div');
+      none.className = 'empty';
+      none.textContent = '（这一类没有文件）';
+      files.appendChild(none);
+    } else {
+      for (const f of group.files) files.appendChild(fileLine(f));
+    }
+
+    head.addEventListener('click', () => {
+      const open = files.style.display !== 'none';
+      files.style.display = open ? 'none' : 'block';
+      head.textContent = `${open ? '▸' : '▾'} ${group.folder}　`;
+      head.appendChild(count);
+      box.classList.toggle('hidden', open && group.files.length === 0);
+    });
+
+    box.appendChild(head);
+    box.appendChild(files);
+    el.previewTree.appendChild(box);
+  }
+
+  // 有文件的分类默认展开，方便一眼看清
+  for (const box of Array.from(el.previewTree.querySelectorAll('.folder'))) {
+    const head = box.querySelector('.folder-head');
+    const files = box.querySelector('.files') as HTMLDivElement | null;
+    if (!head || !files) continue;
+    const label = head.textContent ?? '';
+    if (label.startsWith('▸')) files.style.display = 'block';
+  }
+}
+
+/** 清掉上一次预览，避免「旧预览」被误当成当前名单的结果。 */
+function clearPreview(): void {
+  el.previewWarning.textContent = '';
+  el.previewSummary.textContent = '';
+  el.previewTree.textContent = '';
+}
+
+el.preview.addEventListener('click', () => {
+  void (async () => {
+    clearPreview();
+    if (selectedFiles.length === 0) {
+      notice('还没有可预览的文件，先拖进来或点「选择文件」');
+      return;
+    }
+    if (!outputDir) {
+      notice('还没选输出文件夹，先点「选择输出文件夹」');
+      return;
+    }
+
+    let outcome: PreviewOutcome;
+    try {
+      outcome = await api.preview(selectedFiles.slice(), outputDir);
+    } catch (err) {
+      notice(`预览没做出来：${(err as Error)?.message ?? '未知错误'}`);
+      return;
+    }
+
+    if (!outcome || outcome.ok !== true) {
+      notice(outcome && outcome.message ? outcome.message : '预览没做出来');
+      return;
+    }
+
+    const tree = outcome.tree;
+    el.previewWarning.textContent = PREVIEW_WARNING;
+    const notes: string[] = [];
+    if (tree.unreadableCount > 0) notes.push(`其中 ${tree.unreadableCount} 个读不到文件信息，已标注原因`);
+    if (tree.outputDir) notes.push(`计划输出到：${tree.outputDir}`);
+    el.previewSummary.textContent =
+      `共 ${tree.total} 个文件，会分到 ${tree.folders.filter((g) => g.count > 0).length} 个分类文件夹` +
+      (notes.length > 0 ? `（${notes.join('；')}）` : '');
+    renderPreviewTree(tree);
+    notice('预览完成：这一步没有写任何文件');
+  })();
+});
+
+/** 名单或输出文件夹变了，上一次的预览就作废。 */
+function invalidatePreview(): void {
+  clearPreview();
 }
 
 /* ---------------- 拖拽 ---------------- */
@@ -140,6 +267,7 @@ el.pickFiles.addEventListener('click', () => {
 el.clearFiles.addEventListener('click', () => {
   selectedFiles = [];
   refreshCounts();
+  invalidatePreview();
   el.list.textContent = '';
   el.summary.textContent = '整理完成：成功 0 个，失败 0 个';
   notice('已清空文件名单');
@@ -151,6 +279,7 @@ el.pickOut.addEventListener('click', () => {
     if (dir) {
       outputDir = dir;
       renderOutDir();
+      invalidatePreview();
       notice('输出文件夹已选定');
     }
   })();

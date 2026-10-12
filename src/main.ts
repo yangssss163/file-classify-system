@@ -6,7 +6,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
-import { copyFiles, type CopyFileResult } from './core';
+import { buildPreviewTree, copyFiles, type CopyFileResult, type PreviewOutcome } from './core';
 
 /** 启动完成标记：验收脚本靠这一行判断「真程序活着」。 */
 const READY_MARKER = 'ORGANIZER_READY';
@@ -132,6 +132,25 @@ ipcMain.handle(
       }
     }
     return map;
+  },
+);
+
+ipcMain.handle(
+  'files:preview',
+  async (_event, payload: { files?: string[]; outputDir?: string | null }): Promise<PreviewOutcome> => {
+    // 预览纯内存计算：只读 stat，不建目录、不写文件、不落任何临时产物。
+    try {
+      return buildPreviewTree({
+        files: payload?.files ?? [],
+        outputDir: payload?.outputDir ?? null,
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        reason: 'internal-error',
+        message: `预览失败：${(err as Error)?.message ?? '未知错误'}`,
+      };
+    }
   },
 );
 

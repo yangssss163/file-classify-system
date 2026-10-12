@@ -2,7 +2,7 @@
  * preload：只暴露几个明确的方法给界面，界面拿不到 node。
  */
 import { contextBridge, ipcRenderer } from 'electron';
-import type { CopySummary } from './core';
+import type { CopySummary, PreviewOutcome } from './core';
 
 export interface OrganizeProgress {
   done: number;
@@ -22,6 +22,8 @@ const api = {
   pickOutputDir: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickOutputDir'),
   exists: (filePaths: string[]): Promise<Record<string, boolean>> =>
     ipcRenderer.invoke('files:exists', filePaths),
+  preview: (files: string[], outputDir: string | null): Promise<PreviewOutcome> =>
+    ipcRenderer.invoke('files:preview', { files, outputDir }),
   organize: (files: string[], outputDir: string): Promise<CopySummary> =>
     ipcRenderer.invoke('files:organize', { files, outputDir }),
   openPath: (dir: string): Promise<string> => ipcRenderer.invoke('shell:openPath', dir),

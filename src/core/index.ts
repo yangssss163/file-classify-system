@@ -4,3 +4,4 @@
 export * from './classify';
 export * from './plan';
 export * from './copyFiles';
+export * from './preview';

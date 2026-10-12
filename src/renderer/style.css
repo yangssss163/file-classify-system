@@ -26,3 +26,15 @@ button.primary { font-weight: 600; }
 .fail { color: #dc2626; }
 .notice { color: #b45309; min-height: 18px; }
 .summary { font-weight: 600; }
+
+/* 预览区：只求看得清（分类名 + 数量 + 文件名） */
+.preview-warning { color: #92400e; background: #fffbeb; border: 1px solid #fde68a; padding: 6px 10px; border-radius: 6px; margin: 6px 0; }
+.preview-tree { border: 1px solid #e4e8ee; border-radius: 6px; padding: 6px 10px; max-height: 260px; overflow: auto; }
+.preview-tree .folder { border-bottom: 1px solid #eef1f5; padding: 3px 0; }
+.preview-tree .folder.hidden { display: none; }
+.preview-tree .folder-head { cursor: pointer; font-weight: 600; }
+.preview-tree .folder-count { color: #2563eb; }
+.preview-tree .files { margin: 4px 0 4px 18px; color: #52606d; }
+.preview-tree .file { padding: 1px 0; }
+.preview-tree .file-error { color: #dc2626; }
+.preview-tree .empty { color: #7b8794; }
