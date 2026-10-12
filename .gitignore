@@ -8,6 +8,7 @@ out/
 # --- 所以下面按「最后匹配为准」把本仓库真正要提交的东西再放进来 ---
 !.gitignore
 !.npmrc
+!ENGINEERING-LOG.md
 !package.json
 !package-lock.json
 !tsconfig.json
