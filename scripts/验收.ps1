@@ -3,6 +3,9 @@
 # 跑法：npm run 验收   （= powershell -ExecutionPolicy Bypass -File scripts\验收.ps1）
 
 $ErrorActionPreference = 'Stop'
+# npm / node 往 stderr 写一句提示（比如 npm notice）不该被当成致命错误中断脚本：
+# 只让 cmdlet 的错误按 Stop 处理，外部程序的非零退出码由我们自己看 $LASTEXITCODE。
+$PSNativeCommandUseErrorActionPreference = $false
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

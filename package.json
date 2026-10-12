@@ -6,8 +6,11 @@
   "main": "out/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
-    "start": "electron .",
-    "验收": "powershell -ExecutionPolicy Bypass -File scripts\\验收.ps1"
+    "prepare": "npm run build",
+    "prestart": "npm run build",
+    "start": "node scripts/start-electron.mjs",
+    "start:headless": "node scripts/start-electron.mjs --no-window",
+    "验收": "npm run build && powershell -ExecutionPolicy Bypass -File scripts\\验收.ps1"
   },
   "devDependencies": {
     "electron": "44.7.0",
