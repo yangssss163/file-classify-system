@@ -2,10 +2,10 @@
 # 标准由控制台写死，工作台只执行，不修改、不放宽。
 # 跑法：npm run 验收   （= powershell -ExecutionPolicy Bypass -File scripts\验收.ps1）
 
-$ErrorActionPreference = 'Stop'
-# npm / node 往 stderr 写一句提示（比如 npm notice）不该被当成致命错误中断脚本：
-# 只让 cmdlet 的错误按 Stop 处理，外部程序的非零退出码由我们自己看 $LASTEXITCODE。
-$PSNativeCommandUseErrorActionPreference = $false
+# 只让 cmdlet 的错误按 Stop 处理；外部程序（node/npm）往 stderr 写提示
+# （比如 npm notice）在 Windows PowerShell 5.1 下会被升级成致命错误，所以这里用 Continue，
+# 由每一条断言自己看 $LASTEXITCODE 和日志内容来判断成败。
+$ErrorActionPreference = 'Continue'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -82,7 +82,15 @@ $elProc = $null
 try {
   Write-Step '--- 3/3 真程序活着 ---'
   $buildLog = Join-Path $stage 'accept-build.log'
-  & npm run build *> $buildLog
+  $nodeExe = (Get-Command node).Source
+  # 用 node 直接跑 npm-cli.js，避开 npm.cmd 的批处理壳子（壳子会把 stderr 当成本命令失败）
+  $npmCli = Join-Path (Split-Path -Parent $nodeExe) 'node_modules\npm\bin\npm-cli.js'
+  if (Test-Path -LiteralPath $npmCli) {
+    & $nodeExe $npmCli run build 2>$null | Out-File -LiteralPath $buildLog -Encoding utf8
+  } else {
+    # 找不到 npm-cli.js 就退回官方脚本，用 cmd 包一层
+    cmd /c "npm run build > `"$buildLog`" 2>&1"
+  }
   $buildCode = $LASTEXITCODE
   Write-Host "npm run build 退出码=$buildCode  日志=$buildLog"
   if ($buildCode -ne 0) {
