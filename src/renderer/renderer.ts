@@ -8,6 +8,7 @@ import type {
   OrganizerApi,
   PreviewOutcome,
   PreviewSourceFolder,
+  PreviewSubFolder,
   PreviewTree,
   Rule,
   ScanResult,
@@ -379,39 +380,78 @@ function collapsible(
   return { box, body, head, text };
 }
 
-/** 一份源文件夹下面的一个分类夹（如 01_图片 —— 2 个文件）。 */
+/** 一份源文件夹下面的一个分类夹（如 01_图片 —— 2 个文件；只装这一层根下的散文件）。 */
 function categoryBlock(group: { folder: string; count: number; files: PreviewTree['files'] }): HTMLDivElement {
   const { box, body } = collapsible(`${group.folder}`, `${group.count} 个文件`, 'files', true, 'cat');
   for (const f of group.files) body.appendChild(fileLine(f));
   return box;
 }
 
-/**
- * 画「某个源文件夹自己那一份」的一行：源路径 + 输出落到哪 + 几个文件；
- * 展开是它下面的分类夹（各归各，绝不与别的源文件夹合在一起）。
- */
-function sourceFolderBlock(sf: PreviewSourceFolder, depth: number): HTMLDivElement {
-  const outPath = sf.outputChain.join('\\');
-  const label = `${sf.name}${sf.renamed ? '（同名，已改成别的输出名）' : ''}（源：${sf.sourcePath}）`;
-  const { box, body } = collapsible(label, `${sf.count} 个文件`, 'source-files', depth === 0, 'source');
+/** 「原样保留」的那棵子树里的一个目录（层级照搬，不再分类）。 */
+function subFolderBlock(sub: PreviewSubFolder, depth: number): HTMLDivElement {
+  const { box, body } = collapsible(
+    `${sub.name}（原样保留）`,
+    sub.count > 0 ? `${sub.count} 个文件` : '（空）',
+    'keep-files',
+    depth < 2,
+    'keep',
+  );
   const outLine = document.createElement('div');
   outLine.className = 'source-out';
-  outLine.textContent = `→ 输出到：${outPath}\\<分类夹>\\`;
+  outLine.textContent = `→ 原样保留到：${sub.outputPath}\\（不按规则重分）`;
   body.appendChild(outLine);
-  if (sf.count === 0) {
+  for (const f of sub.files) body.appendChild(fileLine(f));
+  for (const child of sub.children) body.appendChild(subFolderBlock(child, depth + 1));
+  return box;
+}
+
+/**
+ * 画「某个源文件夹自己那一份」：源路径 + 输出落到哪 + 几个文件。
+ * 展开后分两块（新语义：文件夹优先）：
+ *  - 「本层散文件 → 分类夹」：只有直接躺在这一层根下的文件才按规则分类；
+ *  - 「原样保留的子树」：子文件夹里的文件连层级一起搬，不再按规则重分。
+ */
+function sourceFolderBlock(sf: PreviewSourceFolder, depth: number): HTMLDivElement {
+  const label = `${sf.name}${sf.renamed ? '（同名，已改成别的输出名）' : ''}（源：${sf.sourcePath}）`;
+  const { box, body } = collapsible(
+    label,
+    `${sf.count} 个文件（散文件 ${sf.looseCount} 个按规则分类 / 子文件夹 ${sf.keptCount} 个原样保留）`,
+    'source-files',
+    depth === 0,
+    'source',
+  );
+  const outLine = document.createElement('div');
+  outLine.className = 'source-out';
+  outLine.textContent = `→ 输出到：${sf.outputDir}\\`;
+  body.appendChild(outLine);
+
+  if (sf.looseCount > 0) {
+    const note = document.createElement('div');
+    note.className = 'source-note';
+    note.textContent = `这一层根下的 ${sf.looseCount} 个散文件按规则分到下面这些分类夹：`;
+    body.appendChild(note);
+    for (const g of sf.categories) body.appendChild(categoryBlock(g));
+  } else {
     const none = document.createElement('div');
     none.className = 'empty';
-    none.textContent = '（这一份没有直接躺在它根下的文件）';
+    none.textContent = '（这一层根下没有散文件，所以这里没有分类夹）';
     body.appendChild(none);
   }
-  for (const g of sf.folders) body.appendChild(categoryBlock(g));
+
+  if (sf.subfolders.length > 0) {
+    const note = document.createElement('div');
+    note.className = 'source-note';
+    note.textContent = '子文件夹里的文件按原样保留（连层级一起搬过去），不再按规则重分：';
+    body.appendChild(note);
+    for (const sub of sf.subfolders) body.appendChild(subFolderBlock(sub, 0));
+  }
   return box;
 }
 
 /**
  * 画预览树。
- *  - 拖入了文件夹（tree.tracked）：**按源文件夹分组**，每个源文件夹一份，
- *    下面列出它自己的分类夹（一眼看出「谁和谁不混」），并写清输出落到哪；
+ *  - 拖入了文件夹（tree.tracked）：**按源文件夹分组**（文件夹优先），
+ *    每一份下面分两块：本层散文件按规则去的分类夹、以及原样保留的子树；
  *  - 只是一堆散文件：照旧按分类列出。
  * 全程只往内存里的 DOM 写，不碰磁盘。
  */
@@ -419,9 +459,14 @@ function renderPreviewTree(tree: PreviewTree): void {
   el.previewTree.textContent = '';
 
   if (tree.tracked && Array.isArray(tree.roots) && tree.roots.length > 0) {
+    // 先把那句人话写在最上面（界面上必须明确写出来）
+    const hint = document.createElement('div');
+    hint.className = 'keep-hint';
+    hint.textContent = tree.keepHint;
+    el.previewTree.appendChild(hint);
     for (const root of tree.roots) {
       const { box, body } = collapsible(
-        `${root.name}（源：${root.path}）`,
+        `${root.name}${root.renamed ? '（同名，输出里已改名）' : ''}（源：${root.path}）→ 输出根下的 ${root.outputName}\\`,
         `共 ${root.total} 个文件`,
         'root-files',
         true,
@@ -545,13 +590,19 @@ el.preview.addEventListener('click', () => {
     const tree = outcome.tree;
     el.previewWarning.textContent = PREVIEW_WARNING;
     const notes: string[] = [];
-    if (tree.rulesApplied === true) notes.push(rulesSummaryText());
+    if (tree.rulesApplied === true && tree.tracked !== true) notes.push(rulesSummaryText());
     if (tree.unreadableCount > 0) notes.push(`其中 ${tree.unreadableCount} 个读不到文件信息，已标注原因`);
-    if (tree.tracked === true) notes.push(`来自 ${tree.rootCount} 个文件夹（共 ${tree.sourceFolderCount} 份，各归各，绝不互相混）`);
+    if (tree.tracked === true) {
+      // 文件夹优先：一句话说清「哪几个按规则分了、哪几个原样保留了」
+      notes.push(`来自 ${tree.rootCount} 个文件夹（共 ${tree.sourceFolderCount} 份，各归各，绝不互相混）`);
+      notes.push(`散文件 ${tree.classifyCount} 个按规则分类、子文件夹里 ${tree.keepCount} 个原样保留`);
+    }
     if (tree.skipped && tree.skipped.length > 0) notes.push(`跳过 ${tree.skipped.length} 处`);
     if (tree.outputDir) notes.push(`计划输出到：${tree.outputDir}`);
     el.previewSummary.textContent =
-      `共 ${tree.total} 个文件，会分到 ${tree.folders.filter((g) => g.count > 0).length} 个分类文件夹` +
+      (tree.tracked === true
+        ? `共 ${tree.total} 个文件`
+        : `共 ${tree.total} 个文件，会分到 ${tree.folders.filter((g) => g.count > 0).length} 个分类文件夹`) +
       (notes.length > 0 ? `（${notes.join('；')}）` : '');
     renderPreviewTree(tree);
     renderPreviewSkipped(tree);

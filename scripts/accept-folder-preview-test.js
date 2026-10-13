@@ -371,39 +371,69 @@ async function runInWindowStub(source, label, organizer) {
 }
 
 /* ------------------------------------------------------------------ *
- * 旧版界面产物（纯内存字符串，不落盘）：拖入文件夹时只会说「暂不支持文件夹」
+ * 旧语义的界面产物（纯内存字符串，不落盘）：
+ * 「按旧语义」——文件夹能被展开了，但子文件夹里的文件也被塞进分类夹，
+ * 所以预览按分类夹平铺、也没有那句「子文件夹按原样保留」的说明。
+ * 这条当诱饵，证明本条探针抓得住「语义变了但界面没跟着改」。
  * ------------------------------------------------------------------ */
 
-const LEGACY_NO_FOLDER_PRODUCT = [
-  '// 旧版界面产物：拖入的文件夹被忽略（「暂不支持文件夹」）',
+const LEGACY_CLASSIFY_ALL_PRODUCT = [
+  '// 旧语义界面产物：子文件夹里的文件也被塞进分类夹（分组说明也没有）',
   'const api = window.organizer;',
   'const el = {',
   "  drop: document.getElementById('drop'),",
-  "  fileCount: document.getElementById('file-count'),",
-  "  notice: document.getElementById('notice'),",
-  "  preview: document.getElementById('preview'),",
-  "  previewTree: document.getElementById('preview-tree'),",
-  "  previewSummary: document.getElementById('preview-summary'),",
+  "  pickFolders: document.getElementById('pick-folders'),",
   "  pickFiles: document.getElementById('pick-files'),",
   "  pickOut: document.getElementById('pick-out'),",
+  "  fileCount: document.getElementById('file-count'),",
+  "  notice: document.getElementById('notice'),",
+  "  skipped: document.getElementById('skipped'),",
+  "  preview: document.getElementById('preview'),",
+  "  previewWarning: document.getElementById('preview-warning'),",
+  "  previewTree: document.getElementById('preview-tree'),",
+  "  previewSummary: document.getElementById('preview-summary'),",
   '};',
   'let selectedFiles = [];',
+  'let selectedRoots = [];',
   'let outputDir = null;',
-  'el.pickFiles.addEventListener("click", () => { api.pickFiles().then((list) => { selectedFiles = selectedFiles.concat(list); el.fileCount.textContent = "已选 " + selectedFiles.length + " 个文件"; }); });',
-  'el.pickOut.addEventListener("click", () => { api.pickOutputDir().then((d) => { outputDir = d; }); });',
-  'el.drop.addEventListener("drop", (ev) => {',
-  '  const dt = ev.dataTransfer;',
-  '  const paths = [];',
-  '  for (const file of Array.from(dt.files)) { const p = api.pathForFile(file); if (p) paths.push(p); }',
-  '  // 旧行为：问一下是不是文件；文件夹一律忽略，并说一句「暂不支持文件夹」',
+  'function merge(files) { for (const p of files) if (selectedFiles.indexOf(p) < 0) selectedFiles.push(p); }',
+  'function accept(paths) {',
   '  api.exists(paths).then((map) => {',
-  '    let folders = 0;',
-  '    for (const p of paths) { if (map[p] === true) selectedFiles.push(p); else folders++; }',
-  '    el.fileCount.textContent = "已选 " + selectedFiles.length + " 个文件";',
-  '    el.notice.textContent = folders > 0 ? ("暂不支持文件夹，已忽略 " + folders + " 个文件夹") : "";',
+  '    const files = []; const folders = [];',
+  '    for (const p of paths) { if (map[p] === true) files.push(p); else folders.push(p); }',
+  '    merge(files);',
+  '    if (folders.length === 0) { el.fileCount.textContent = "已选 " + selectedFiles.length + " 个文件"; return; }',
+  '    for (const r of folders) if (selectedRoots.indexOf(r) < 0) selectedRoots.push(r);',
+  '    api.expand(folders).then((scan) => {',
+  '      // 旧语义：展开出来的所有文件都当一个普通文件清单（预览时再按规则分类）',
+  '      merge(scan.files.map((f) => f.fullPath));',
+  '      el.fileCount.textContent = "已选 " + selectedFiles.length + " 个文件（来自 " + selectedRoots.length + " 个文件夹）";',
+  '    });',
+  '  });',
+  '}',
+  'el.drop.addEventListener("drop", (ev) => {',
+  '  const paths = [];',
+  '  for (const file of Array.from(ev.dataTransfer.files)) { const p = api.pathForFile(file); if (p) paths.push(p); }',
+  '  if (paths.length > 0) accept(paths);',
+  '});',
+  'el.pickFiles.addEventListener("click", () => { api.pickFiles().then((list) => accept(list)); });',
+  'el.pickFolders.addEventListener("click", () => { api.pickFolders().then((list) => accept(list)); });',
+  'el.pickOut.addEventListener("click", () => { api.pickOutputDir().then((d) => { outputDir = d; }); });',
+  'el.preview.addEventListener("click", () => {',
+  '  // 旧语义：直接把所有文件（含子文件夹里的）按规则分类，没有分组、也没有那句说明',
+  '  api.preview(selectedFiles.slice(), outputDir, []).then((outcome) => {',
+  '    if (!outcome || outcome.ok !== true) return;',
+  '    el.previewWarning.textContent = "以下是预览，还没有复制任何文件。";',
+  '    el.previewSummary.textContent = "共 " + outcome.tree.total + " 个文件，会分到 " + outcome.tree.folders.filter((g) => g.count > 0).length + " 个分类文件夹";',
+  '    el.previewTree.textContent = "";',
+  '    for (const g of outcome.tree.folders) {',
+  '      const row = document.createElement("div");',
+  '      row.className = "folder";',
+  '      row.textContent = g.folder + " —— " + g.count + " 个文件";',
+  '      el.previewTree.appendChild(row);',
+  '    }',
   '  });',
   '});',
-  'el.preview.addEventListener("click", () => { api.preview(selectedFiles, outputDir).then((outcome) => { if (!outcome || outcome.ok !== true) return; el.previewSummary.textContent = "共 " + outcome.tree.total + " 个文件"; }); });',
 ].join('\n');
 
 /* ------------------------------------------------------------------ *
@@ -527,7 +557,7 @@ async function inspectFolderSupport(productSource, label, ctx) {
       hits.push(`预览提示不对：「${warningText}」`);
     }
 
-    // 分组：每个顶层源文件夹一个分组节点，里面再按分类夹列（不是一长串平铺）
+    // 分组：每个顶层源文件夹一个分组节点；份内既有「原样保留的子树」也有「本层散文件的分类夹」
     const rootNodes = findByClass(treeEl, 'root');
     if (rootNodes.length === 0) {
       hits.push('预览树里没有源文件夹分组节点（class="root"）——没有按源文件夹分组');
@@ -537,11 +567,32 @@ async function inspectFolderSupport(productSource, label, ctx) {
     const sourceNodes = findByClass(treeEl, 'source');
     const nestedSource = sourceNodes.filter((n) => hasNestedGroup(n, 'cat'));
     if (nestedSource.length === 0) {
-      hits.push('预览树里每一份源文件夹下面没有分类夹节点（class="cat"）');
+      hits.push('预览树里每一份源文件夹下面没有分类夹节点（class="cat"）——散文件那条路说不清');
     }
     for (const n of nestedSource) {
       const text = textOf(n);
       if (!/个文件/.test(text)) hits.push(`某一层源文件夹没有写清有几个文件：「${text.slice(0, 80)}」`);
+    }
+
+    // 新语义：界面上必须**明确写出那句人话**（子文件夹按原样保留、只有散文件按规则分类）
+    const keepNodes = findByClass(treeEl, 'keep');
+    if (keepNodes.length === 0) {
+      hits.push('预览树里没有「原样保留的子树」节点（class="keep"）——子文件夹里的文件没按新语义画出来');
+    }
+    const hint = treeEl.children.find((c) => c.className === 'keep-hint');
+    if (!hint) {
+      hits.push('预览树里没有那句说明（class="keep-hint"）——界面上看不出「子文件夹按原样保留」');
+    } else {
+      const hintText = String(hint.textContent || '');
+      if (!/原样保留/.test(hintText)) {
+        hits.push(`那句说明没说「原样保留」：「${hintText}」`);
+      }
+      if (!/散|分类/.test(hintText)) {
+        hits.push(`那句说明没说「只有散文件按规则分类」：「${hintText}」`);
+      }
+      if (!/子文件夹/.test(hintText)) {
+        hits.push(`那句说明没说清「子文件夹」：「${hintText}」`);
+      }
     }
     for (const want of ['下载', '照片', '文档', '婚纱', '另一处']) {
       if (!new RegExp(want).test(treeText)) hits.push(`预览树里看不到「${want}」这一层：${treeText.slice(0, 120)}`);
@@ -706,38 +757,49 @@ async function inspectFolderSupport(productSource, label, ctx) {
     });
 
     /* ---------- 五、探针必须是活的 ---------- */
-    await check('探针有效性自检：拿「不支持文件夹」的旧版界面产物喂进去必须判失败，真产物必须通过', async () => {
-      // (1) 旧版产物：拖入文件夹只会说「暂不支持文件夹」
-      const legacyHits = await inspectFolderSupport(LEGACY_NO_FOLDER_PRODUCT, 'legacy-no-folder.js', ctx);
-      ok(legacyHits.length > 0, '「不支持文件夹」的旧产物被说 OK —— 探针是死的');
-      log(`      旧产物被抓到的证据（前 3 条）：${legacyHits.slice(0, 3).join(' | ')}`);
-      // 其中必须真的抓到「没有分组」这一类问题（不能只是因为没有 pick-folders 按钮就侥幸判失败）
+    await check('探针有效性自检：拿「按旧语义（子文件夹里的文件也塞进分类夹）」的产物喂进去必须判失败，真产物必须通过', async () => {
+      // (1) 旧语义产物：子文件夹里的文件也被塞进分类夹，也没有「原样保留」的分组与那句说明
+      const legacyHits = await inspectFolderSupport(LEGACY_CLASSIFY_ALL_PRODUCT, 'legacy-classify-all.js', ctx);
+      ok(legacyHits.length > 0, '「按旧语义」的产物被说 OK —— 探针是死的');
+      log(`      旧语义产物被抓到的证据（前 3 条）：${legacyHits.slice(0, 3).join(' | ')}`);
+      // 必须真的抓在「新语义」这一点上，而不是因为没有 pick-folders 按钮之类侥幸判失败
       ok(
-        legacyHits.some((h) => /expand|分组|来自/.test(h)),
-        `旧产物被抓到的理由与「文件夹分组」无关：${legacyHits.join(' | ')}`,
+        legacyHits.some((h) => /keep|原样保留|说明/.test(h)),
+        `旧语义产物被抓到的理由与新语义无关：${legacyHits.join(' | ')}`,
       );
 
-      // (2) 把真产物里「展开文件夹」这一步抽掉（其余照旧，文件夹被当成空的）：
-      //     这正是旧行为「拖入文件夹没有任何文件进来」——必须判失败
-      const crippledExpand = rendererJs
-        .split('await api.expand(roots)')
-        .join('(await Promise.resolve({ files: [], folders: [], skipped: [] }))');
-      ok(crippledExpand !== rendererJs, '没能造出「不展开文件夹」的产物样本');
-      const crippledHits = await inspectFolderSupport(crippledExpand, 'crippled-no-expand.js', ctx);
-      ok(crippledHits.length > 0, '「不展开文件夹」的产物被说 OK —— 探针是死的');
-      log(`      抽掉「展开文件夹」后的证据（前 3 条）：${crippledHits.slice(0, 3).join(' | ')}`);
+      // (2) 把真产物里「原样保留的子树」那一块抽掉（其余照旧）：分组/说明必然缺 —— 必须判失败
+      //     （换成空语句，保证产物语法仍然正常，不至于「因为跑不起来」侥幸判失败）
+      const KEEP_BLOCK = 'body.appendChild(subFolderBlock(sub, 0));';
+      const noKeepBlock = rendererJs.split(KEEP_BLOCK).join('void 0;');
+      ok(noKeepBlock !== rendererJs, '没能造出「不画原样保留子树」的产物样本');
+      const noKeepHits = await inspectFolderSupport(noKeepBlock, 'crippled-no-keep-block.js', ctx);
+      ok(noKeepHits.length > 0, '「不画原样保留子树」的产物被说 OK —— 探针是死的');
+      log(`      抽掉「原样保留子树」后的证据（前 3 条）：${noKeepHits.slice(0, 3).join(' | ')}`);
 
-      // (3) 把真产物里「把源文件夹传给预览」这一步抽掉：分组必然画不出来 → 必须判失败
+      // (3) 把真产物里那句说明抽掉（其余照旧）：必须判失败（控制台要求界面上必须写出那句话）
+      const noHint = rendererJs
+        .split("hint.textContent = tree.keepHint;")
+        .join("hint.textContent = '';");
+      ok(noHint !== rendererJs, '没能造出「不写那句说明」的产物样本');
+      const noHintHits = await inspectFolderSupport(noHint, 'crippled-no-hint.js', ctx);
+      ok(
+        noHintHits.some((h) => /keep-hint|说明/.test(h)),
+        `「不写那句说明」的产物没有被抓到说明缺失：${noHintHits.join(' | ') || '（竟然全过）'}`,
+      );
+      log(`      抽掉「那句说明」后的证据（前 3 条）：${noHintHits.slice(0, 3).join(' | ')}`);
+
+      // (4) 把真产物里「把源文件夹传给预览」这一步抽掉：分组必然画不出来 → 必须判失败
       const noRootsToPreview = withoutSetSourceRoots(rendererJs);
       ok(noRootsToPreview !== rendererJs, '没能造出「不把源文件夹传给预览」的产物样本');
       const noRootsHits = await inspectFolderSupport(noRootsToPreview, 'crippled-no-setroots.js', ctx);
       ok(noRootsHits.length > 0, '「不把源文件夹传给预览」的产物被说 OK —— 探针是死的');
       log(`      抽掉「放下源文件夹」后的证据（前 3 条）：${noRootsHits.slice(0, 3).join(' | ')}`);
 
-      // (4) 真产物必须通过（这一遍是单独一遍，不复用上面的结果）
+      // (5) 真产物必须通过（这一遍是单独一遍，不复用上面的结果）
       const liveHits = await inspectFolderSupport(rendererJsProbe, 'current-renderer-folders.js', ctx);
       ok(liveHits.length === 0, `真产物被判不合格（探针误报）：${liveHits.join(' | ')}`);
-      log('      探针：旧产物判失败、抽掉展开判失败、抽掉「放下源文件夹」判失败、真产物判通过');
+      log('      探针：旧语义产物判失败、抽掉原样保留判失败、抽掉说明判失败、抽掉源文件夹判失败、真产物判通过');
     });
   } catch (err) {
     log(`FAIL: 测试过程本身出错 -> ${(err && err.stack) || err}`);

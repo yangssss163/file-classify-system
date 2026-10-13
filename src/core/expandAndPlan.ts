@@ -1,22 +1,32 @@
 /**
- * 纯逻辑：递归展开拖进来的文件夹 + 按「源文件夹各归各」算目标路径。**不依赖 Electron**。
+ * 纯逻辑：递归展开拖进来的文件夹 + 算每个文件的目标路径。**不依赖 Electron**。
  *
- * 用户定的硬要求：**不同源文件夹的文件永远不会落进同一个分类夹**。
- * 所以这里把「谁属于哪个源文件夹」当成一等公民（`SourceFolderOrigin` + `TrackedFile`），
- * 一路带到目标路径上：
+ * 本片的语义是**文件夹优先**（用户拍板的）：
  *
- *   输出根\
- *     下载\                 ← 拖入的那个源文件夹，输出根下同名一份
- *       01_图片\            ← 下载 根下散文件的分类夹
- *       照片\               ← 下载 里的子文件夹，自己独立一份
- *         01_图片\          ← 照片 里文件的分类夹（与「文档」那边完全分开）
- *         婚纱\
- *           01_图片\
- *       文档\
- *         02_文档\
+ *   1. **子文件夹里的文件按原样保留相对路径**：`下载\照片\风景\a.jpg` → `<输出根>\下载\照片\风景\a.jpg`
+ *      —— 一路原样搬过去，**不再按规则重分**；源文件夹的层级结构原样保留。
+ *   2. **只有散在「某个源文件夹自己那层根下」的文件才按规则分类**：
+ *      `下载\散1.jpg` → `<输出根>\下载\<规则算出的分类夹>\散1.jpg`。
+ *   3. **绝不混在一起**（用户硬要求）：来自不同源文件夹的文件永远不会出现在同一个输出目录里。
+ *      新语义下这条天然成立且更强：整棵源文件夹树是按原路径搬的，只有各层根下的散文件进分类夹，
+ *      而那些分类夹也各自待在**自己那一层**下面。
+ *   4. **同名不相撞**：同一段输出路径里同名的文件夹要加序号（`备份`、`备份 (2)`）；
+ *      不同父目录下的同名子文件夹各待在各的父层下面，本来就不撞。
+ *
+ * 结构示意（输出根下）：
+ *   下载\                     ← 拖入的源文件夹，输出根下同名一份
+ *     01_图片\                ← 「下载」根下散文件（散1.jpg）的分类夹
+ *     散3.xlsx                ← 「下载」根下的散文件，规则算出来是 05_其他，所以直接在这层……
+ *     照片\                   ← 「下载」的子文件夹：原样保留
+ *       图1.png
+ *       婚纱\
+ *         纱1.jpg
+ *   另一处\
+ *     照片\
+ *       图2.png
  *
  * 铁律：
- *  - 递归只收**文件**；空文件夹不产生任何输出；
+ *  - 递归只收**文件**；空文件夹不产生输出；
  *  - 读不了的子文件夹 → 跳过并记一行原因（`skipped`），绝不让整次展开失败；
  *  - 不跟随符号链接 / 快捷方式（一律跳过并记原因），避免绕圈；
  *  - 深度超过 `MAX_SCAN_DEPTH`（20）层就停下并说明原因；
@@ -32,6 +42,10 @@ import { describeError } from './copyFiles';
 /** 递归深度上限：超过就停下并说明原因（防止循环/超深目录把程序拖死）。 */
 export const MAX_SCAN_DEPTH = 20;
 
+/** 界面上那句人话（预览里必须明确写出来）。只有这一个来源，不许在别处再写一份。 */
+export const FOLDER_KEEP_HINT =
+  '子文件夹里的文件按原样保留（连层级一起搬过去），不再按规则重分；只有散在源文件夹自己那层根下的文件才按规则分类。';
+
 /* ------------------------------------------------------------------ *
  * 类型
  * ------------------------------------------------------------------ */
@@ -40,7 +54,7 @@ export const MAX_SCAN_DEPTH = 20;
 export interface SourceFolderOrigin {
   /** 拖入的那个源文件夹的绝对路径（= 输出根下同名夹的来源） */
   rootPath: string;
-  /** 源文件夹名 */
+  /** 顶层源文件夹名 */
   rootName: string;
   /** 相对拖入点的各层子文件夹名；根自己就是 []，如 ['照片']、['照片','婚纱'] */
   chain: string[];
@@ -79,63 +93,106 @@ export interface SkippedPath {
 export interface ScanResult {
   /** 所有展开出来的文件（按遍历顺序），每个都带归属 */
   files: TrackedFile[];
-  /** 所有产生过文件的源文件夹（含各层子文件夹；按发现顺序） */
+  /** 探到的源文件夹（含各层子文件夹；先父后子。空文件夹也在里面，有没有文件看 fileCount） */
   folders: SourceFolderOrigin[];
   /** 被跳过的路径与原因 */
   skipped: SkippedPath[];
 }
 
-/** 一个源文件夹在输出里的落点（含「同名不覆盖」的重命名结果）。 */
-export interface PlannedFolder {
+/** 展开出来的目录树：每个源文件夹一个节点，子文件夹挂在 children 上。 */
+export interface ScanNode {
   origin: SourceFolderOrigin;
-  /** 相对输出根的各层文件夹名（已按「同名不覆盖」改过名） */
-  outputChain: string[];
-  /** 该源文件夹自己的输出目录（绝对路径） */
-  outputDir: string;
-  /** 该源文件夹直属的文件个数（就是落到 outputDir\分类夹\ 的那些） */
-  fileCount: number;
-  /** 是否因为「有两个同名源文件夹」改过名（如「照片」→「照片 (2)」） */
-  renamed: boolean;
+  /** 直接躺在这一层根下的文件（这些才按规则分类） */
+  looseFiles: TrackedFile[];
+  /** 这一层的子文件夹（按名字排序，顺序稳定） */
+  children: ScanNode[];
 }
 
-/** 一个文件最终落到哪里（预览与执行**共用同一份**）。 */
+/**
+ * 一个文件最终落到哪里（预览与执行**共用同一份**）。
+ * `targetDir` 是最终目录（原样保留时 = 原目录在输出里的对应位置；分类时 = 该层 + 分类夹）。
+ */
 export interface PlannedFile {
-  /** 原文件路径（字段名同 `TrackedFile.fullPath`，避开 `.path` 那种旧写法） */
+  /** 原文件路径 */
   fullPath: string;
   /** 最终文件名（同名冲突时可能已被换成「原名 (1).后缀」） */
   name: string;
-  /** 目标分类文件夹名 */
-  folder: string;
-  /** 所属源文件夹 */
+  /** 源文件所在的源文件夹 */
   origin: SourceFolderOrigin;
-  /** 该源文件夹在输出里的落点 */
-  plannedFolder: PlannedFolder;
-  /** 最终目标目录（绝对路径）= 源文件夹落点 + 分类夹 */
+  /** 输出里的目标目录（绝对路径） */
   targetDir: string;
+  /**
+   * 这个文件是怎么安排的：
+   *  - `keep`：子文件夹里的文件 → 按原样保留相对路径，不分类；
+   *  - `classify`：源文件夹自己那层根下的散文件 → 按规则进分类夹（`category` 是分类夹名）。
+   */
+  placement: 'keep' | 'classify';
+  /** 分类夹名；`keep` 时为 null */
+  category: string | null;
   /** 是否因同名冲突换过名 */
   renamed: boolean;
 }
 
-/** 同一层里已经被用掉的名字（大小写不敏感），避免同名源文件夹互相覆盖。 */
-export type TakenScopes = ReadonlyMap<string, ReadonlySet<string>>;
+/**
+ * 一个源文件夹在输出里的落点。
+ * 列表只存**自己这一层**的东西（`keptFiles`/`categories`），
+ * 子树里的文件留在各自的 `subfolders` 节点上 ——
+ * 汇总个数一律现算（见 `countKeptOf` / `PlannedFolder.totalFileCount`），
+ * 免得同一份文件在父节点和子节点里各存一份、被数两遍。
+ */
+export interface PlannedFolder {
+  origin: SourceFolderOrigin;
+  /** 输出里的名字（可能因为同名被改成「照片 (2)」） */
+  outputName: string;
+  /** 输出目录（绝对路径） */
+  outputDir: string;
+  /** 是否因为「同段路径里有同名文件夹」改过名 */
+  renamed: boolean;
+
+  /** 这一份（含子树）的文件总数 = 本层散文件 + 子树里原样保留的 */
+  totalFileCount: number;
+  /** 直接躺在这一层根下的散文件个数（顶层才按规则分类） */
+  looseFileCount: number;
+  /** 这一层原样保留的直接文件个数（子文件夹那几层才有） */
+  keptFileCount: number;
+
+  /** 这一层根下散文件的分类夹（只有顶层源文件夹才有；空分类不列） */
+  categories: Array<{ category: string; files: PlannedFile[] }>;
+  /** 这一层**原样保留**的直接文件（只有子文件夹那几层才有） */
+  keptFiles: PlannedFile[];
+  /** 它下面的子文件夹（原样保留；空文件夹不列） */
+  subfolders: PlannedFolder[];
+}
+
+/** 一棵完整的目标结构：一个顶层源文件夹一个节点。 */
+export interface PlannedRoot {
+  origin: SourceFolderOrigin;
+  /** 输出根下这一份的名字（同名顶层源文件夹会被改成「备份 (2)」） */
+  outputName: string;
+  /** 输出根下的目录（绝对路径） */
+  outputDir: string;
+  renamed: boolean;
+  /** 这一份的内容（和 `PlannedFolder` 同一套字段） */
+  subtree: PlannedFolder;
+  /** 这一份一共有几个文件（含子树） */
+  totalFileCount: number;
+}
 
 export interface PlanOptions {
   /** 输出根目录 */
   outputDir: string;
-  /** 展开结果（`expandFolders` / `scanFolders` 的产物） */
-  scan: ScanResult;
-  /** 分类规则表；不传就用默认规则 */
+  /** 展开结果（`expandFolders` / `scanFolders` 的产物；带 `tree`） */
+  scan: ScanResult & { tree: ScanNode[] };
+  /** 分类规则表；只对「源文件夹自己那层根下的散文件」起作用；不传就用默认规则 */
   rules?: RuleTable | null;
-  /** 目标目录里已存在的名字：目标目录（小写）→ 名字集合。不传就当作都是空的（纯内存预览用） */
-  takenByDir?: TakenScopes;
 }
 
 export interface PlanResult {
   /** 输出根 */
   outputDir: string;
-  /** 所有源文件夹的落点 */
-  folders: PlannedFolder[];
-  /** 每个文件的最终落点（顺序与 `scan.files` 一致） */
+  /** 顶层源文件夹的落点（一个拖入的源文件夹一个） */
+  roots: PlannedRoot[];
+  /** 所有文件的最终落点（顺序与 `scan.files` 一致） */
   files: PlannedFile[];
   /** 被跳过的路径与原因（原样带过来） */
   skipped: SkippedPath[];
@@ -175,7 +232,7 @@ export function probePath(target: string): StatInfo {
 }
 
 /* ------------------------------------------------------------------ *
- * 递归展开
+ * 递归展开（只读）
  * ------------------------------------------------------------------ */
 
 /** 源文件夹的稳定身份键。 */
@@ -189,129 +246,139 @@ export function joinedPath(base: string, name: string): string {
   return `${base}${sep}${name}`;
 }
 
+interface ScanOutcome {
+  node: ScanNode;
+  skipped: SkippedPath[];
+}
+
 /**
- * 递归展开一个源文件夹：只收文件、逐层各归各、空文件夹不产生输出。
- *
- * @param rootPath 拖入的源文件夹路径（绝对路径）
- * @param options.maxDepth 深度上限（默认 20）
- * @param options.ignoreMissingRoot 根自己读不到时是否算「正常跳过」（拖入后已被删掉的情形）
+ * 只读递归一个源文件夹：只收文件、空文件夹不产生输出、读不了的跳过并记原因、
+ * 不跟随符号链接、超过 `maxDepth` 层就停下并说明原因。
  */
-export function scanFolders(
+function scanNodeAt(
+  dir: string,
   rootPath: string,
-  options: { maxDepth?: number; ignoreMissingRoot?: boolean; rootName?: string } = {},
-): ScanResult {
+  rootName: string,
+  chain: string[],
+  maxDepth: number,
+  seenDirs: Set<string>,
+): ScanOutcome {
+  const origin: SourceFolderOrigin = { rootPath, rootName, chain, key: originKeyOf(rootPath, chain) };
+  const node: ScanNode = { origin, looseFiles: [], children: [] };
+  const skipped: SkippedPath[] = [];
+
+  let entries: fssync.Dirent[];
+  try {
+    entries = fssync.readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    skipped.push({ fullPath: dir, originKey: origin.key, reason: `读不了这个文件夹：${describeError(err)}` });
+    return { node, skipped };
+  }
+
+  for (const entry of entries) {
+    const childPath = joinedPath(dir, entry.name);
+    if (entry.isSymbolicLink()) {
+      skipped.push({
+        fullPath: childPath,
+        originKey: origin.key,
+        name: entry.name,
+        reason: '这是一个符号链接/快捷方式，本片不跟随（免得绕圈）',
+      });
+      continue;
+    }
+    if (entry.isFile()) {
+      node.looseFiles.push({ fullPath: childPath, name: entry.name, origin });
+      continue;
+    }
+    if (!entry.isDirectory()) {
+      skipped.push({
+        fullPath: childPath,
+        originKey: origin.key,
+        name: entry.name,
+        reason: '这既不是文件也不是文件夹，已跳过',
+      });
+      continue;
+    }
+
+    // 深度上限：`chain.length` 就是「当前在第几层子文件夹」。
+    // 到达上限后就不再往里建节点，并记一句原因 —— 免得循环链接或超深目录把程序拖住。
+    const childDepth = chain.length + 1;
+    if (childDepth > maxDepth) {
+      skipped.push({
+        fullPath: childPath,
+        originKey: origin.key,
+        name: entry.name,
+        reason: `目录层级太深（超过 ${maxDepth} 层），已跳过（可能是循环链接或确实太深）`,
+      });
+      continue;
+    }
+    const lower = childPath.toLowerCase();
+    if (seenDirs.has(lower)) {
+      skipped.push({
+        fullPath: childPath,
+        originKey: origin.key,
+        name: entry.name,
+        reason: '这个文件夹又绕回来了（成环），已跳过',
+      });
+      continue;
+    }
+    seenDirs.add(lower);
+
+    const child = scanNodeAt(childPath, rootPath, rootName, chain.concat([entry.name]), maxDepth, seenDirs);
+    node.children.push(child.node);
+    for (const s of child.skipped) skipped.push(s);  }
+
+  node.children.sort((a, b) => a.origin.chain[a.origin.chain.length - 1].localeCompare(b.origin.chain[b.origin.chain.length - 1]));
+  return { node, skipped };
+}
+
+/** 深度优先把一棵树里的所有节点按「先父后子」摊平。 */
+function flattenNodes(node: ScanNode, out: ScanNode[] = []): ScanNode[] {
+  out.push(node);
+  for (const child of node.children) flattenNodes(child, out);
+  return out;
+}
+
+export interface ScanOptions {
+  maxDepth?: number;
+  /** 根自己读不到时是否算「正常跳过」（拖入后已被删掉的情形） */
+  ignoreMissingRoot?: boolean;
+  /** 只在内部用：给根起个别的显示名 */
+  rootName?: string;
+}
+
+/** 递归展开一个源文件夹，返回「目录树 + 摊平的文件清单」。 */
+export function scanFolders(rootPath: string, options: ScanOptions = {}): ScanResult & { tree: ScanNode[] } {
   const root = String(rootPath ?? '');
   const maxDepth = Math.max(1, Math.min(Number(options?.maxDepth ?? MAX_SCAN_DEPTH) || MAX_SCAN_DEPTH, 200));
-  const files: TrackedFile[] = [];
-  const folderMap = new Map<string, SourceFolderOrigin>();
-  const skipped: SkippedPath[] = [];
   const rootName = options?.rootName && options.rootName.length > 0 ? options.rootName : path.basename(root);
+  const skipped: SkippedPath[] = [];
 
   const rootProbe = probePath(root);
   if (rootProbe.error || !rootProbe.isDirectory) {
     if (!options?.ignoreMissingRoot) {
-      skipped.push({
-        fullPath: root,
-        originKey: originKeyOf(root, []),
-        reason: rootProbe.error ?? '这不是一个文件夹',
-      });
+      skipped.push({ fullPath: root, originKey: originKeyOf(root, []), reason: rootProbe.error ?? '这不是一个文件夹' });
     }
-    return { files, folders: [], skipped };
+    return { files: [], folders: [], skipped, tree: [] };
   }
 
-  interface QueueItem {
-    dir: string;
-    chain: string[];
-  }
-
-  const queue: QueueItem[] = [{ dir: root, chain: [] }];
   const seenDirs = new Set<string>([root.toLowerCase()]);
-  let head = 0;
+  const scan = scanNodeAt(root, root, rootName, [], maxDepth, seenDirs);
+  const nodes = flattenNodes(scan.node);
+  const files: TrackedFile[] = [];
+  for (const node of nodes) for (const f of node.looseFiles) files.push(f);
+  // 递归里收上来的跳过原因（太深 / 成环 / 读不了 / 符号链接）必须带出去，不能丢
+  for (const s of scan.skipped) skipped.push(s);
 
-  while (head < queue.length) {
-    const current = queue[head++];
-    const origin: SourceFolderOrigin = {
-      rootPath: root,
-      rootName,
-      chain: current.chain,
-      key: originKeyOf(root, current.chain),
-    };
-    if (!folderMap.has(origin.key)) folderMap.set(origin.key, origin);
-
-    let entries: fssync.Dirent[];
-    try {
-      entries = fssync.readdirSync(current.dir, { withFileTypes: true });
-    } catch (err) {
-      skipped.push({ fullPath: current.dir, originKey: origin.key, reason: `读不了这个文件夹：${describeError(err)}` });
-      continue;
-    }
-
-    for (const entry of entries) {
-      const childPath = joinedPath(current.dir, entry.name);
-      if (entry.isSymbolicLink()) {
-        skipped.push({
-          fullPath: childPath,
-          originKey: origin.key,
-          name: entry.name,
-          reason: '这是一个符号链接/快捷方式，本片不跟随（免得绕圈）',
-        });
-        continue;
-      }
-      if (entry.isFile()) {
-        files.push({ fullPath: childPath, name: entry.name, origin });
-        continue;
-      }
-      if (!entry.isDirectory()) {
-        skipped.push({
-          fullPath: childPath,
-          originKey: origin.key,
-          name: entry.name,
-          reason: '这既不是文件也不是文件夹，已跳过',
-        });
-        continue;
-      }
-
-      const depth = current.chain.length + 1;
-      if (depth > maxDepth) {
-        skipped.push({
-          fullPath: childPath,
-          originKey: origin.key,
-          name: entry.name,
-          reason: `目录层级太深（超过 ${maxDepth} 层），已跳过（可能是循环链接或确实太深）`,
-        });
-        continue;
-      }
-      const lower = childPath.toLowerCase();
-      if (seenDirs.has(lower)) {
-        skipped.push({
-          fullPath: childPath,
-          originKey: origin.key,
-          name: entry.name,
-          reason: '这个文件夹又绕回来了（成环），已跳过',
-        });
-        continue;
-      }
-      seenDirs.add(lower);
-      queue.push({ dir: childPath, chain: current.chain.concat([entry.name]) });
-    }
-  }
-
-  // 全部展开到的源文件夹都留着（包括「自己根下没有文件、只有子文件夹里有」的那几层）：
-  // 它们是输出路径上必须占位的一段；有没有文件由 `fileCount` 说话。
-  const folders = Array.from(folderMap.values());
-  // 先父后子（浅的在前）：算输出名时必须先知道父文件夹在输出里叫什么
-  folders.sort((a, b) => a.chain.length - b.chain.length);
-  return { files, folders, skipped };
+  return { files, folders: nodes.map((n) => n.origin), skipped, tree: [scan.node] };
 }
 
 /** 多个源文件夹一起展开（拖入多个文件夹 / 「选择文件夹」多选）。 */
-export function expandFolders(
-  rootPaths: readonly string[],
-  options: { maxDepth?: number; ignoreMissingRoot?: boolean } = {},
-): ScanResult {
+export function expandFolders(rootPaths: readonly string[], options: ScanOptions = {}): ScanResult & { tree: ScanNode[] } {
   const files: TrackedFile[] = [];
   const folders: SourceFolderOrigin[] = [];
   const skipped: SkippedPath[] = [];
+  const tree: ScanNode[] = [];
   const seenRoots = new Set<string>();
   for (const raw of rootPaths ?? []) {
     const root = String(raw);
@@ -325,16 +392,21 @@ export function expandFolders(
     for (const f of one.files) files.push(f);
     for (const f of one.folders) folders.push(f);
     for (const s of one.skipped) skipped.push(s);
+    for (const t of one.tree) tree.push(t);
   }
-  return { files, folders, skipped };
+  return { files, folders, skipped, tree };
 }
 
 /* ------------------------------------------------------------------ *
- * 目标路径：同一层里同名源文件夹不覆盖
+ * 目标路径
  * ------------------------------------------------------------------ */
 
 /** 同一段输出路径里挑一个不冲突的文件夹名：原名可用就用原名，否则「原名 (2)」「原名 (3)」… */
-function pickUniqueFolderName(baseName: string, scope: string, usedByScope: Map<string, Set<string>>): { name: string; renamed: boolean } {
+function pickUniqueFolderName(
+  baseName: string,
+  scope: string,
+  usedByScope: Map<string, Set<string>>,
+): { name: string; renamed: boolean } {
   let used = usedByScope.get(scope);
   if (!used) {
     used = new Set<string>();
@@ -357,132 +429,170 @@ export function targetDirOf(outputDir: string, outputChain: readonly string[]): 
   return outputChain.length === 0 ? outputDir : `${outputDir}${sep}${outputChain.join(path.sep)}`;
 }
 
-/**
- * 把「源文件夹」映射成「它在输出里的那一段路径」。**纯函数**，不碰磁盘。
- *
- * 关键点（本片踩过一次的坑）：
- *  - 顶层源文件夹在输出根下同名的不覆盖（`照片` / `照片 (2)`）；
- *  - 子文件夹的父段必须用**父文件夹在输出里的名字**，而不是源里的名字 —— 否则
- *    「下载\照片」与「另一处\照片」会因为名字一样被挤到同一个目录里去；
- *  - 父文件夹自己「直接躺着文件」时它有份、没有时它只是路径上的一段 ——
- *    **父段无论有没有文件都必须先分配好**，子文件夹才不会掉到输出根下。
- */
-function allocateOutputChains(origins: readonly SourceFolderOrigin[]): Map<string, PlannedFolder> {
-  const usedByScope = new Map<string, Set<string>>();
-  const plannedByKey = new Map<string, PlannedFolder>();
-  const outputChainOf = (origin: SourceFolderOrigin): string[] => {
-    if (origin.chain.length === 0) return [];
-    const parent = plannedByKey.get(originKeyOf(origin.rootPath, origin.chain.slice(0, -1)));
-    return parent ? parent.outputChain : origin.chain.slice(0, -1);
-  };
+/** 这一份（含子树）原样保留的文件个数。 */
+export function countKeptOf(folder: PlannedFolder): number {
+  let n = folder.keptFiles.length;
+  for (const sub of folder.subfolders) n += countKeptOf(sub);
+  return n;
+}
 
-  // 先父后子：浅的在前（`scan.folders` 已经是这个顺序，这里再排一次保险）
-  const ordered = origins.slice().sort((a, b) => a.chain.length - b.chain.length);
-  for (const origin of ordered) {
-    if (plannedByKey.has(origin.key)) continue;
-    const parentOutputChain = outputChainOf(origin);
-    const base = origin.chain.length > 0 ? origin.chain[origin.chain.length - 1] : origin.rootName;
-    // 作用域 = 父段在输出里的路径（顶层就是输出根）：同段路径里同名才需要「(2)」
-    const picked = pickUniqueFolderName(base, '\u0000' + parentOutputChain.join('\\').toLowerCase(), usedByScope);
-    const planned: PlannedFolder = {
-      origin,
-      outputChain: parentOutputChain.concat([picked.name]),
-      outputDir: '',
-      fileCount: 0,
-      renamed: picked.renamed,
-    };
-    plannedByKey.set(origin.key, planned);
-  }
-  return plannedByKey;
+/** 这一份（含子树）的文件总数。 */
+function countFilesOf(folder: PlannedFolder): number {
+  let n = folder.looseFileCount + folder.keptFiles.length;
+  for (const sub of folder.subfolders) n += countFilesOf(sub);
+  return n;
 }
 
 /**
- * 纯函数：把展开结果算成「每个文件落到哪个目录的哪个名字」。
+ * 纯函数：把展开出来的目录树算成「每个文件落到哪个目录的哪个名字」。
  *
- * 关键保证（用户定的硬要求）：**同一个目标分类夹里的文件必然来自同一个源文件夹**。
- * 所以每个源文件夹在输出里都有自己的一段路径，绝不与别的源文件夹合并。
- * 命名（同名源文件夹不覆盖 / 文件同名换名）走的是与执行时**同一个** `pickUniqueName`。
+ * 两条路（与用户定的新语义一一对应）：
+ *  - 源文件夹自己那层根下的散文件 → 按规则进 `<该层>\<分类夹>\`，分类夹名由规则算出来；
+ *  - 子文件夹里的文件 → **原样保留相对路径**，目录与源里一一对应，不分类。
+ * 同一段输出路径里同名的文件夹加序号（`备份`、`备份 (2)`），文件同名沿用「原名 (1).后缀」。
  */
+/** 一棵展开树里有多少个文件（含所有层；顶层自己根下的 + 子树里的）。 */
+function countScanFiles(node: ScanNode): number {
+  let n = node.looseFiles.length;
+  for (const child of node.children) n += countScanFiles(child);
+  return n;
+}
+
 export function buildPlan(options: PlanOptions): PlanResult {
   const outputDir = String(options?.outputDir ?? '');
-  const scan = options?.scan ?? { files: [], folders: [], skipped: [] };
+  const scan = options?.scan ?? { files: [], folders: [], skipped: [], tree: [] };
   const rules = options?.rules ?? null;
-  const takenByDir = options?.takenByDir ?? new Map<string, ReadonlySet<string>>();
-
-  const cloneTaken = (dir: string): Set<string> => {
-    const found = takenByDir.get(dir.toLowerCase());
-    return new Set(Array.from(found ?? []).map((n) => n.toLowerCase()));
-  };
-
-  // 1. 先把「用得上的源文件夹」都找齐：有文件的那几份，各自也要有祖先那几段。
-  //    例：源文件夹「另一处」自己根下没有文件、只有 另一处\照片 里有 —— 「另一处」这一段照样要占位。
-  const needed = new Map<string, SourceFolderOrigin>();
-  const addWithAncestors = (origin: SourceFolderOrigin): void => {
-    let chain = origin.chain.slice();
-    for (;;) {
-      const key = originKeyOf(origin.rootPath, chain);
-      if (needed.has(key)) break;
-      needed.set(key, chain.length === origin.chain.length ? origin : { ...origin, chain: chain.slice(), key });
-      if (chain.length === 0) break;
-      chain = chain.slice(0, -1);
-    }
-  };
-  for (const origin of scan.folders) addWithAncestors(origin);
-  for (const file of scan.files) addWithAncestors(file.origin);
-
-  const plannedByKey = allocateOutputChains(Array.from(needed.values()));
-  for (const planned of plannedByKey.values()) planned.outputDir = targetDirOf(outputDir, planned.outputChain);
-
-  // 2. 每个文件：先按规则分分类，再在「自己那一层的分类夹」里挑一个不冲突的文件名
-  const batchTaken = new Map<string, Set<string>>();
+  const usedByScope = new Map<string, Set<string>>();
+  /** 目标目录（小写）→ 已经用掉的文件名，避免同一批里重名互撞 */
+  const takenByDir = new Map<string, Set<string>>();
   const files: PlannedFile[] = [];
-  for (const file of scan.files) {
-    const planned = plannedByKey.get(file.origin.key);
-    if (!planned) continue;
-    planned.fileCount++;
-    const matched = classifyWithMeta(rules, file.fullPath, file.name);
-    const targetDir = joinedPath(planned.outputDir, matched.folder);
-    const dirKey = targetDir.toLowerCase();
-    let taken = batchTaken.get(dirKey);
-    if (!taken) {
-      taken = cloneTaken(targetDir);
-      batchTaken.set(dirKey, taken);
+
+  /**
+   * 处理一个源文件夹节点。
+   * @param classifyHere 这一层根下的文件是否按规则分类 —— **只有顶层源文件夹才是 true**；
+   *   子文件夹里的文件一律**原样保留**（连层级一起搬，不再按规则重分）。
+   */
+  const processNode = (
+    node: ScanNode,
+    outputName: string,
+    outputDirPath: string,
+    classifyHere: boolean,
+    renamed: boolean,
+  ): PlannedFolder => {
+    const planned: PlannedFolder = {
+      origin: node.origin,
+      outputName,
+      outputDir: outputDirPath,
+      renamed,
+      subfolders: [],
+      keptFiles: [],
+      categories: [],
+      looseFileCount: 0,
+      keptFileCount: 0,
+      totalFileCount: 0,
+    };
+
+    // ① 这一层根下的文件：
+    //    - 顶层源文件夹：**散文件按规则分类**，进 `outputDirPath\<分类夹>\`；
+    //    - 子文件夹：**原样保留**，直接待在 `outputDirPath\` 这一层。
+    for (const file of node.looseFiles) {
+      if (classifyHere) {
+        const matched = classifyWithMeta(rules, file.fullPath, file.name);
+        const categoryDir = joinedPath(outputDirPath, matched.folder);
+        const dirKey = categoryDir.toLowerCase();
+        let taken = takenByDir.get(dirKey);
+        if (!taken) {
+          taken = new Set<string>();
+          takenByDir.set(dirKey, taken);
+        }
+        const picked = pickUniqueName(file.name, taken);
+        const finalName = picked.name === null ? file.name : picked.name;
+        taken.add(finalName.toLowerCase());
+        const entry: PlannedFile = {
+          fullPath: file.fullPath,
+          name: finalName,
+          origin: node.origin,
+          targetDir: categoryDir,
+          placement: 'classify',
+          category: matched.folder,
+          renamed: picked.renamed,
+        };
+        files.push(entry);
+        planned.looseFileCount++;
+        let bucket = planned.categories.find((c) => c.category === matched.folder);
+        if (!bucket) {
+          bucket = { category: matched.folder, files: [] };
+          planned.categories.push(bucket);
+        }
+        bucket.files.push(entry);
+      } else {
+        const dirKey = outputDirPath.toLowerCase();
+        let taken = takenByDir.get(dirKey);
+        if (!taken) {
+          taken = new Set<string>();
+          takenByDir.set(dirKey, taken);
+        }
+        const picked = pickUniqueName(file.name, taken);
+        const finalName = picked.name === null ? file.name : picked.name;
+        taken.add(finalName.toLowerCase());
+        const entry: PlannedFile = {
+          fullPath: file.fullPath,
+          name: finalName,
+          origin: node.origin,
+          targetDir: outputDirPath,
+          placement: 'keep',
+          category: null,
+          renamed: picked.renamed,
+        };
+        files.push(entry);
+        planned.keptFiles.push(entry);
+        planned.keptFileCount++;
+      }
     }
-    const picked = pickUniqueName(file.name, taken);
-    const finalName = picked.name === null ? file.name : picked.name;
-    taken.add(finalName.toLowerCase());
-    files.push({
-      fullPath: file.fullPath,
-      name: finalName,
-      folder: matched.folder,
-      origin: file.origin,
-      plannedFolder: planned,
-      targetDir,
+    planned.categories.sort((a, b) => a.category.localeCompare(b.category));
+
+    // ② 子文件夹：**原样保留**（结构照搬，名字在同一段输出路径里不撞）
+    for (const child of node.children) {
+      const childName = child.origin.chain[child.origin.chain.length - 1];
+      const picked = pickUniqueFolderName(childName, '\u0000' + outputDirPath.toLowerCase(), usedByScope);
+      const childDir = joinedPath(outputDirPath, picked.name);
+      planned.subfolders.push(processNode(child, picked.name, childDir, false, picked.renamed));
+    }
+
+    planned.totalFileCount = countFilesOf(planned);
+    return planned;
+  };
+
+  const roots: PlannedRoot[] = [];
+  for (const node of scan.tree ?? []) {
+    // 空文件夹不产生任何输出：整棵子树一个文件都没有，就连落点/名字都不占
+    if (countScanFiles(node) === 0) continue;
+    const picked = pickUniqueFolderName(node.origin.rootName, '\u0000<输出根>', usedByScope);
+    const rootOutputDir = targetDirOf(outputDir, [picked.name]);
+    // 顶层源文件夹：这一层根下的散文件按规则分类（新语义的第一条路）
+    const subtree = processNode(node, picked.name, rootOutputDir, true, picked.renamed);
+    roots.push({
+      origin: node.origin,
+      outputName: picked.name,
+      outputDir: rootOutputDir,
       renamed: picked.renamed,
+      subtree,
+      totalFileCount: subtree.totalFileCount,
     });
   }
 
-  // 落点只列「真的有文件的那几份」（空文件夹不产生输出）；路径上纯占位的那几段不列
-  const withFiles = new Set(scan.folders.map((f) => f.key));
-  const plannedFolders: PlannedFolder[] = [];
-  for (const origin of scan.folders) {
-    const planned = plannedByKey.get(origin.key);
-    if (planned && withFiles.has(origin.key) && planned.fileCount > 0) plannedFolders.push(planned);
-  }
-
-  return { outputDir, folders: plannedFolders, files, skipped: scan.skipped };
+  return { outputDir, roots, files, skipped: scan.skipped };
 }
 
 /* ------------------------------------------------------------------ *
  * 一次导出：展开 + 算目标路径
  * ------------------------------------------------------------------ */
 
-/** `planFolders` 的结果：算好的目标路径 + 展开细节（跳过原因、读不到的目标目录）。 */
 export interface FolderPlanOutcome {
   plan: PlanResult;
   scan: ScanResult;
-  /** 读目标目录时读不到的目录与原因（不致命：当作里面是空的，但要在界面上说清） */
-  takenReadErrors: SkippedPath[];
+  /** 展开出来的目录树（预览按它画分组） */
+  tree: ScanNode[];
 }
 
 export interface FolderPlanInput {
@@ -491,48 +601,16 @@ export interface FolderPlanInput {
   /** 输出根目录（可以还不存在——预览绝不创建它） */
   outputDir: string | null;
   rules?: RuleTable | null;
-  /** 是否读目标目录里已有的名字（默认 true；纯内存场合可关掉） */
-  checkExisting?: boolean;
 }
 
 /**
- * 展开 + 算目标路径。预览与执行都走这里，所以「预览说去 A、执行去了 B」不可能发生。
- * `checkExisting` 只做只读 readdir：
- *  - 目标目录不存在 / 读不了 → 当作空，并记进 `takenReadErrors`（不致命）。
+ * 展开 + 算目标路径。**预览与执行都走这里**，所以「预览说去 A、执行去了 B」不可能发生。
+ * 本函数只做只读的 stat/readdir，绝不建目录、绝不写文件。
  */
 export function planFolders(input: FolderPlanInput): FolderPlanOutcome {
   const roots = Array.from(input?.roots ?? []).map((r) => String(r));
   const scan = expandFolders(roots);
   const outputDir = input?.outputDir === null || input?.outputDir === undefined ? '' : String(input.outputDir);
-  const checkExisting = input?.checkExisting !== false;
-  const takenByDir = new Map<string, Set<string>>();
-  const takenReadErrors: SkippedPath[] = [];
-
-  if (checkExisting && outputDir.length > 0) {
-    // 只探测「按源文件夹原名算出来的落点目录」：算目标路径时只需要知道这些目录里已有什么名字
-    const candidates = new Set<string>();
-    for (const origin of scan.folders) {
-      const chain = origin.chain.length > 0 ? origin.chain : [origin.rootName];
-      candidates.add(targetDirOf(outputDir, chain));
-    }
-    for (const dir of candidates) {
-      try {
-        const names = fssync.readdirSync(dir);
-        takenByDir.set(dir.toLowerCase(), new Set(names.map((n) => String(n).toLowerCase())));
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException)?.code ?? '';
-        if (code !== 'ENOENT') {
-          // 目录真的在、但读不了：记一行原因（不致命）
-          takenReadErrors.push({
-            fullPath: dir,
-            originKey: '',
-            reason: `输出目录读不了，里面已有什么名字无法确认：${describeError(err)}`,
-          });
-        }
-      }
-    }
-  }
-
-  const plan = buildPlan({ outputDir, scan, rules: input?.rules ?? null, takenByDir });
-  return { plan, scan, takenReadErrors };
+  const plan = buildPlan({ outputDir, scan, rules: input?.rules ?? null });
+  return { plan, scan, tree: scan.tree };
 }

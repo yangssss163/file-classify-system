@@ -47,37 +47,49 @@ export interface PreviewFolder {
 
 /**
  * 预览里「某个源文件夹自己那一份」。
- * 源文件夹各归各：来自不同源文件夹的文件绝不会出现在同一份里。
+ * 新语义（文件夹优先）：份内分两块 —— 本层散文件按规则去的分类夹、原样保留的子树。
  */
 export interface PreviewSourceFolder {
-  /** 源文件夹名（子文件夹就是它自己那一层的名字） */
   name: string;
-  /** 源文件夹完整路径（说清「这一份是哪来的」） */
   sourcePath: string;
-  /** 相对顶层的各层子文件夹名；顶层就是 [] */
   chain: string[];
-  /** 顶层源文件夹路径 */
   rootPath: string;
-  /** 顶层源文件夹名 */
   rootName: string;
-  /** 输出里的这一份相对输出根的路径（如 ['下载','照片']） */
-  outputChain: string[];
-  /** 这一份的输出目录（显示用，预览绝不创建它） */
+  /** 输出里的名字（同段路径里同名时会被改成「照片 (2)」） */
+  outputName: string;
   outputDir: string;
-  /** 这一份自己的文件个数 */
+  /** 这一份（含子树）的文件总数 */
   count: number;
-  /** 是不是因为「另一个同名源文件夹」改过名（如「照片 (2)」） */
+  /** 直接躺在这一层根下、按规则分类的散文件个数 */
+  looseCount: number;
+  /** 这一份下面原样保留的文件个数（子文件夹里的） */
+  keptCount: number;
   renamed: boolean;
-  /** 这一份下面的分类夹 */
-  folders: PreviewFolder[];
+  /** 这一层根下散文件的分类夹 */
+  categories: PreviewFolder[];
+  /** 原样保留的子树 */
+  subfolders: PreviewSubFolder[];
 }
 
-/** 预览树里的一个顶层源文件夹：它自己 + 它下面的每一层子文件夹各一份。 */
+/** 预览里「原样保留的那棵子树」的一个目录。 */
+export interface PreviewSubFolder {
+  name: string;
+  sourcePath: string;
+  /** 输出里的路径（相对输出根） */
+  outputPath: string;
+  count: number;
+  files: PreviewFile[];
+  children: PreviewSubFolder[];
+}
+
+/** 预览树里的一个顶层源文件夹。 */
 export interface PreviewRoot {
   name: string;
   path: string;
   /** 输出里的顶层名字（同名不覆盖时可能被改成「备份 (2)」） */
   outputName: string;
+  /** 是不是因为「另一个同名顶层源文件夹」改过名 */
+  renamed: boolean;
   self: PreviewSourceFolder;
   children: PreviewSourceFolder[];
   /** 这个顶层源文件夹一共展开出几个文件（含子文件夹里的） */
@@ -95,7 +107,7 @@ export interface PreviewTree {
   outputDir: string | null;
   /** 本次预览用的是不是界面上的规则表（不是就是默认规则） */
   rulesApplied: boolean;
-  /** 有没有按「源文件夹各归各」分组（拖入了文件夹时才是 true） */
+  /** 有没有按「源文件夹各归各 + 文件夹优先」分组（拖入了文件夹时才是 true） */
   tracked: boolean;
   /** 拖进来的顶层源文件夹个数（界面上的「来自 M 个文件夹」） */
   rootCount: number;
@@ -105,6 +117,12 @@ export interface PreviewTree {
   roots: PreviewRoot[];
   /** 被跳过的路径与原因（读不了的子文件夹、符号链接、太深的目录…） */
   skipped: { fullPath: string; reason: string; name?: string }[];
+  /** 界面上必须写出来的那句人话：子文件夹按原样保留、只有散文件按规则分类 */
+  keepHint: string;
+  /** 按规则分类的散文件个数（合计） */
+  classifyCount: number;
+  /** 原样保留的文件个数（合计） */
+  keepCount: number;
 }
 
 /** 被跳过的路径与原因（展开文件夹时）。 */

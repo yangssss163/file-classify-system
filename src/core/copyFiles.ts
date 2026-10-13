@@ -136,10 +136,10 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
   const dirKeyOf = (dir: string): string => `${dir.toLowerCase()}\\`;
 
   /**
-   * 先把目标路径全算好（预览与执行共用同一个 `buildPlan`），再动手复制。
-   * 有 roots 时：先按源文件夹分组树算（每个源文件夹一份），再补上没归到任何源文件夹的文件（照旧按分类夹落）。
+   * 先把目标路径全算好（预览与执行共用同一个 `planFolders`），再动手复制。
+   * 有 roots 时走「文件夹优先」：子文件夹里的文件原样保留相对路径，只有源文件夹各层根下的散文件按规则进分类夹。
    */
-  const planned = new Map<string, { dir: string; name: string; folder: string; root: string | null; chain: string[] | null; renamed: boolean }>();
+  const planned = new Map<string, { dir: string; name: string; folder: string; root: string | null; chain: string[] | null; renamed: boolean; placement: 'keep' | 'classify' }>();
   let plan: PlanResult | null = null;
   const roots = Array.from(options.roots ?? []).map((r) => String(r)).filter((r) => r.length > 0);
   if (roots.length > 0) {
@@ -148,10 +148,12 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
       planned.set(f.fullPath.toLowerCase(), {
         dir: f.targetDir,
         name: f.name,
-        folder: f.folder,
+        // 原样保留的文件不算「进哪个分类夹」：`folder` 留空串，界面上也就不会说它被分类了
+        folder: f.placement === 'classify' ? (f.category ?? '') : '',
         root: f.origin.rootPath,
         chain: f.origin.chain.slice(),
         renamed: f.renamed,
+        placement: f.placement,
       });
     }
   }
@@ -250,14 +252,15 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
     failureCount: results.filter((r) => !r.ok).length,
     results,
     outputDir,
+    // 顶层源文件夹在输出里的落点（哪份源路径 → 输出里叫什么），界面上据此说清「同名被改了名」
     plannedFolders: plan
-      ? plan.folders.map((f) => ({
-          sourcePath: f.origin.chain.length > 0 ? path.join(f.origin.rootPath, ...f.origin.chain) : f.origin.rootPath,
-          sourceChain: f.origin.chain.slice(),
-          outputChain: f.outputChain.slice(),
-          outputDir: f.outputDir,
-          fileCount: f.fileCount,
-          renamed: f.renamed,
+      ? plan.roots.map((r) => ({
+          sourcePath: r.origin.rootPath,
+          sourceChain: [] as string[],
+          outputChain: [r.outputName],
+          outputDir: r.outputDir,
+          fileCount: r.totalFileCount,
+          renamed: r.renamed,
         }))
       : [],
     skipped: plan ? plan.skipped.map((s) => ({ path: s.fullPath, reason: s.reason, name: s.name })) : [],

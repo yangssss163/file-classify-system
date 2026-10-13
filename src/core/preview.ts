@@ -10,7 +10,15 @@ import { baseName, extensionOf } from './classify';
 import { activeFolderNamesOf, type RuleTable } from './rules';
 import { classifyWithMeta } from './classifyWithMeta';
 import { describeError } from './copyFiles';
-import { planFolders, type PlanResult, type SkippedPath } from './expandAndPlan';
+import {
+  countKeptOf,
+  FOLDER_KEEP_HINT,
+  planFolders,
+  type PlanResult,
+  type PlannedFolder,
+  type ScanNode,
+  type SkippedPath,
+} from './expandAndPlan';
 
 /** 某个文件读不到元信息时的说明；能读到就是 null。 */
 export interface PreviewFileError {
@@ -48,10 +56,13 @@ export interface PreviewFolder {
 
 /**
  * 预览里「某个源文件夹自己那一份」：源文件夹各归各，一眼看出哪一份是哪个源路径来的。
+ * 新语义（文件夹优先）下，这一份里有两种东西：
+ *  - `categories`：这一层根下**散文件**按规则去的分类夹；
+ *  - `subfolders`：**原样保留**的子树（结构照搬，不按规则重分）。
  * （分组显示用，绝不落盘。）
  */
 export interface PreviewSourceFolder {
-  /** 源文件夹名（子文件夹就是它自己那一层的名字） */
+  /** 源文件夹名 */
   name: string;
   /** 源文件夹完整路径（说清「这一份是哪来的」） */
   sourcePath: string;
@@ -61,19 +72,41 @@ export interface PreviewSourceFolder {
   rootPath: string;
   /** 顶层源文件夹名 */
   rootName: string;
-  /** 输出里的这一份相对输出根的路径（如 ['下载','照片']）；同名源文件夹会被改成「照片 (2)」 */
-  outputChain: string[];
+  /** 输出里的名字（同段路径里同名时会被改成「照片 (2)」） */
+  outputName: string;
   /** 这一份的输出目录（显示用，预览绝不创建它） */
   outputDir: string;
-  /** 这一份的文件个数（只算它自己根下的文件） */
+  /** 这一份（含子树）的文件总数 */
   count: number;
-  /** 是不是因为「另一个同名源文件夹」改过名 */
+  /** 直接躺在这一层根下、按规则分类的散文件个数 */
+  looseCount: number;
+  /** 这一份下面原样保留的文件个数（子文件夹里的） */
+  keptCount: number;
+  /** 是不是因为「同段路径里有同名文件夹」改过名 */
   renamed: boolean;
-  /** 这一份下面的分类夹（名字 + 文件明细） */
-  folders: PreviewFolder[];
+  /** 这一层根下散文件的分类夹（按规则算出来的；空分类不列） */
+  categories: PreviewFolder[];
+  /** 原样保留的子树（空文件夹不列） */
+  subfolders: PreviewSubFolder[];
 }
 
-/** 预览树里的一个顶层源文件夹：它自己 + 它下面的每一层子文件夹各一份。 */
+/** 预览里「原样保留的那棵子树」的一个目录。 */
+export interface PreviewSubFolder {
+  /** 目录名（源里的名字，同段同名时可能带序号） */
+  name: string;
+  /** 源里的路径 */
+  sourcePath: string;
+  /** 输出里的路径（相对输出根） */
+  outputPath: string;
+  /** 这个目录（含下面整棵子树）有几个文件 */
+  count: number;
+  /** 直接躺在这个目录里的文件 */
+  files: PreviewFile[];
+  /** 它下面的子目录 */
+  children: PreviewSubFolder[];
+}
+
+/** 预览树里的一个顶层源文件夹。 */
 export interface PreviewRoot {
   /** 顶层源文件夹名 */
   name: string;
@@ -81,9 +114,11 @@ export interface PreviewRoot {
   path: string;
   /** 输出里的顶层名字（同名不覆盖时可能被改成「备份 (2)」） */
   outputName: string;
-  /** 这一份自己（相对输出根就是 [输出名]） */
+  /** 是不是因为「另一个同名顶层源文件夹」改过名 */
+  renamed: boolean;
+  /** 这一份自己 */
   self: PreviewSourceFolder;
-  /** 它下面各层子文件夹的份数（按发现顺序；源文件夹各归各） */
+  /** 它下面各层子文件夹各一份（按发现顺序；各归各） */
   children: PreviewSourceFolder[];
   /** 这个顶层源文件夹一共展开出几个文件（含子文件夹里的） */
   total: number;
@@ -107,7 +142,7 @@ export interface PreviewTree {
   outputDir: string | null;
   /** 本次预览用的是不是调用方传进来的规则表（不是就是默认规则） */
   rulesApplied: boolean;
-  /** 有没有按「源文件夹各归各」分组（拖入了文件夹时才是 true） */
+  /** 有没有按「源文件夹各归各 + 文件夹优先」分组（拖入了文件夹时才是 true） */
   tracked: boolean;
   /** 拖进来的顶层源文件夹个数（= 界面上的「来自 M 个文件夹」）；没有分组时为 0 */
   rootCount: number;
@@ -117,6 +152,12 @@ export interface PreviewTree {
   roots: PreviewRoot[];
   /** 被跳过的路径与原因（读不了的子文件夹、符号链接、太深的目录…）；一个都没有时为空数组 */
   skipped: SkippedPath[];
+  /** 界面上必须写出来的那句人话：子文件夹按原样保留、只有散文件按规则分类 */
+  keepHint: string;
+  /** 按规则分类的散文件个数（合计） */
+  classifyCount: number;
+  /** 原样保留的文件个数（合计） */
+  keepCount: number;
 }
 
 /** 没选输出文件夹 / 没拖入任何文件时的提示（人话，不抛错）。 */
@@ -234,14 +275,13 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
   for (const folder of activeFolderNamesOf(rules)) byFolder.set(folder, []);
 
   let plan: PlanResult | null = null;
-  let skipped: SkippedPath[] = [];
+  let tree: ScanNode[] = [];
 
   if (tracked) {
     // 展开 + 算目标路径：与「开始整理」走同一个 planFolders（只读，绝不建目录）
-    const outcome = planFolders({ roots, outputDir: String(outputDir), rules, checkExisting: checkReadable });
+    const outcome = planFolders({ roots, outputDir: String(outputDir), rules });
     plan = outcome.plan;
-    skipped = plan.skipped.slice();
-    for (const s of outcome.takenReadErrors) skipped.push(s);
+    tree = outcome.tree;
   }
 
   const pushInto = (folder: string, item: PreviewFile): void => {
@@ -268,8 +308,13 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
   };
 
   if (tracked && plan) {
+    // 顶部那份「按分类汇总」：只列**按规则分类的散文件**
+    // （子文件夹里的是原样保留的，不进任何分类夹，所以不列在这里）
     for (const f of plan.files) {
-      pushInto(f.folder, previewItemOf(f.fullPath, f.folder));
+      if (f.placement === 'classify') {
+        const category = f.category ?? '';
+        pushInto(category, previewItemOf(f.fullPath, category));
+      }
     }
   } else {
     for (const raw of files) {
@@ -279,6 +324,12 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
     }
   }
 
+  // 这一次的文件总数与两种去处的个数（原样保留的也算总数，只是不进分类夹）
+  const plannedFiles = tracked && plan ? plan.files : [];
+  const classifyCount = tracked && plan ? plannedFiles.filter((f) => f.placement === 'classify').length : entries.length;
+  const keepCount = tracked && plan ? plannedFiles.filter((f) => f.placement === 'keep').length : 0;
+  const totalCount = tracked && plan ? plannedFiles.length : entries.length;
+
   const folders: PreviewFolder[] = [];
   const counts: Record<string, number> = {};
   for (const [folder, list] of byFolder) {
@@ -286,84 +337,58 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
     counts[folder] = list.length;
   }
 
-  // 按源文件夹分组（每一份各归各）：一份一个分类夹列表，绝不合到一起
+  // 按源文件夹分组（每一份各归各）：份内再分「原样保留的子树」与「这一层散文件的分类夹」
   const rootsOut: PreviewRoot[] = [];
   let sourceFolderCount = 0;
   if (tracked && plan) {
-    const makeSourceFolder = (planned: PlanResult['folders'][number]): PreviewSourceFolder => {
-      const origin = planned.origin;
-      return {
-        name: origin.chain.length > 0 ? origin.chain[origin.chain.length - 1] : origin.rootName,
-        sourcePath: origin.chain.length > 0 ? [origin.rootPath, ...origin.chain].join('\\') : origin.rootPath,
-        chain: origin.chain.slice(),
-        rootPath: origin.rootPath,
-        rootName: origin.rootName,
-        outputChain: planned.outputChain.slice(),
-        outputDir: planned.outputDir,
-        count: 0,
-        renamed: planned.renamed,
-        folders: [],
-      };
-    };
-    const sourceFolderByKey = new Map<string, PreviewSourceFolder>();
-    const ensureRoot = (rootPath: string, rootName: string): PreviewRoot => {
-      const found = rootsOut.find((r) => r.path.toLowerCase() === rootPath.toLowerCase());
-      if (found) return found;
-      const created: PreviewRoot = {
-        name: rootName,
-        path: rootPath,
-        outputName: rootName,
-        self: makeSourceFolder({
-          origin: { rootPath, rootName, chain: [], key: rootPath },
-          outputChain: [rootName],
-          outputDir: '',
-          fileCount: 0,
-          renamed: false,
-        }),
-        children: [],
-        total: 0,
-      };
-      rootsOut.push(created);
-      return created;
-    };
+    const makeSourceFolder = (planned: PlannedFolder): PreviewSourceFolder => ({
+      name: planned.outputName === '' ? planned.origin.rootName : sourceNameOf(planned.origin),
+      sourcePath: sourcePathOf(planned.origin),
+      chain: planned.origin.chain.slice(),
+      rootPath: planned.origin.rootPath,
+      rootName: planned.origin.rootName,
+      outputName: planned.outputName,
+      outputDir: planned.outputDir,
+      count: planned.totalFileCount,
+      looseCount: planned.looseFileCount,
+      keptCount: countKeptOf(planned),
+      renamed: planned.renamed,
+      categories: planned.categories.map((g) => ({
+        folder: g.category,
+        count: g.files.length,
+        files: g.files.map((f) => previewItemOf(f.fullPath, g.category)),
+      })),
+      subfolders: planned.subfolders.map((sub) => makeSubFolder(sub)),
+    });
 
-    for (const planned of plan.folders) {
-      const sf = makeSourceFolder(planned);
-      sourceFolderByKey.set(planned.origin.key, sf);
-      sourceFolderCount++;
-      const rootEntry = ensureRoot(planned.origin.rootPath, planned.origin.rootName);
-      if (planned.origin.chain.length === 0) {
-        rootEntry.self = sf;
-        if (planned.outputChain.length > 0) rootEntry.outputName = planned.outputChain[planned.outputChain.length - 1];
-      } else {
-        rootEntry.children.push(sf);
-      }
-    }
+    const makeSubFolder = (sub: PlannedFolder): PreviewSubFolder => ({
+      name: sub.outputName,
+      sourcePath: sourcePathOf(sub.origin),
+      outputPath: sub.outputDir,
+      count: sub.totalFileCount,
+      // 这一层原样保留的文件就是它自己的直接文件（子目录里的留在各自节点上）
+      files: sub.keptFiles.map((f) => previewItemOf(f.fullPath, '')),
+      children: sub.subfolders.map((c) => makeSubFolder(c)),
+    });
 
-    // 每一份下面的分类夹（空分类不列，免得每一份都拖一堆空行）
-    for (const f of plan.files) {
-      const sf = sourceFolderByKey.get(f.plannedFolder.origin.key);
-      if (!sf) continue;
-      let bucket = sf.folders.find((g) => g.folder === f.folder);
-      if (!bucket) {
-        bucket = { folder: f.folder, count: 0, files: [] };
-        sf.folders.push(bucket);
-      }
-      bucket.files.push(previewItemOf(f.fullPath, f.folder));
-      bucket.count = bucket.files.length;
-      sf.count++;
-    }
-
-    // 顶层源文件夹的「一共几个文件」= 它自己 + 它下面各层
-    for (const rootEntry of rootsOut) {
-      rootEntry.total = rootEntry.self.count + rootEntry.children.reduce((sum, c) => sum + c.count, 0);
+    for (const root of plan.roots) {
+      sourceFolderCount += 1 + countNodes(root.subtree.subfolders);
+      rootsOut.push({
+        name: root.origin.rootName,
+        path: root.origin.rootPath,
+        outputName: root.outputName,
+        renamed: root.renamed,
+        self: makeSourceFolder(root.subtree),
+        children: flattenPlanned(root.subtree.subfolders).map((f) => makeSourceFolder(f)),
+        total: root.totalFileCount,
+      });
     }
   }
 
   return {
     ok: true,
     tree: {
-      total: entries.length,
+      total: totalCount,
       folders,
       counts,
       files: entries,
@@ -375,7 +400,36 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
       rootCount: rootsOut.length,
       sourceFolderCount,
       roots: rootsOut,
-      skipped,
+      skipped: plan ? plan.skipped.slice() : [],
+      keepHint: FOLDER_KEEP_HINT,
+      classifyCount,
+      keepCount,
     },
   };
+}
+
+/** 源文件夹的完整路径。 */
+function sourcePathOf(origin: { rootPath: string; chain: string[] }): string {
+  return origin.chain.length > 0 ? [origin.rootPath, ...origin.chain].join('\\') : origin.rootPath;
+}
+
+/** 源文件夹这一层的名字。 */
+function sourceNameOf(origin: { rootName: string; chain: string[] }): string {
+  return origin.chain.length > 0 ? origin.chain[origin.chain.length - 1] : origin.rootName;
+}
+
+/** 一棵计划子树里的节点个数。 */
+function countNodes(subs: readonly PlannedFolder[]): number {
+  let n = 0;
+  for (const s of subs) n += 1 + countNodes(s.subfolders);
+  return n;
+}
+
+/** 把一棵计划子树按「先父后子」摊平。 */
+function flattenPlanned(subs: readonly PlannedFolder[], out: PlannedFolder[] = []): PlannedFolder[] {
+  for (const s of subs) {
+    out.push(s);
+    flattenPlanned(s.subfolders, out);
+  }
+  return out;
 }
