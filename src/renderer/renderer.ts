@@ -34,6 +34,34 @@ function newRuleId(): string {
 }
 
 /**
+ * 造一条全新的空规则。
+ * 这里只负责「造」，不负责「放到哪」——放置位置由 `addRule()` 决定（必须是末尾）。
+ */
+function makeNewRule(): Rule {
+  return {
+    id: newRuleId(),
+    name: '新分类',
+    enabled: true,
+    condition: { extensions: [], keywords: [], minSize: null, maxSize: null, modTime: 'any' },
+  };
+}
+
+/**
+ * 新增规则：**追加到规则表末尾**，排在所有已有规则之后。
+ *
+ * 为什么必须是末尾：规则表从上往下求值、第一条命中的生效，而列表里的行顺序**就是**这个数组的顺序
+ * （只有这一套顺序，不拆成「显示顺序」和「求值顺序」两套）。新规则要是插到最前，它会永远抢先命中，
+ * 用户已经配好的那套规则等于被架空 —— 用起来就是「加了一条规则，结果全乱套」。
+ * 想让新规则优先，用行上的「上移」自己挪。
+ *
+ * @returns 新规则在表里的下标（= 最后一个位置），便于核对
+ */
+function addRule(rules: Rule[]): number {
+  rules.push(makeNewRule());
+  return rules.length - 1;
+}
+
+/**
  * 取元素：拿不到就给一个空壳（挂在它上面的监听器无效，但不会让整个界面脚本崩溃）。
  * 真正缺元素属于接线问题，由验收脚本的第 7 条（规则编辑器）盯着。
  */
@@ -623,9 +651,9 @@ async function loadRulesFromDisk(): Promise<void> {
 
 listen(el.ruleAdd, 'click', () => {
   const next = currentRules.slice();
-  next.push({ id: newRuleId(), name: '新分类', enabled: true, condition: { extensions: [], keywords: [], minSize: null, maxSize: null, modTime: 'any' } });
+  addRule(next); // 追加到末尾：新规则不许抢在已有规则前面
   setRules(next);
-  setRuleStatus(`已新增 1 条规则，当前共 ${next.length} 条（记得点「保存规则」）`);
+  setRuleStatus(`已新增 1 条规则（排在最后一行，第 ${next.length} 行），当前共 ${next.length} 条（记得点「保存规则」）`);
 });
 
 listen(el.ruleDefault, 'click', () => {

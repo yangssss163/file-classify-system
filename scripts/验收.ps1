@@ -43,7 +43,7 @@ function Fail([string]$why) {
 # ---------- 第 1 条：纯逻辑测试（不需要界面） ----------
 $logic = $false
 try {
-  Write-Step '--- 1/5 纯逻辑测试 ---'
+  Write-Step '--- 1/7 纯逻辑测试 ---'
   $outDir = Join-Path $projectRoot 'out'
   New-Item -ItemType Directory -Force -Path $outDir | Out-Null
   $logicTestJs = Join-Path $stage 'accept-logic-test.js'
@@ -64,7 +64,7 @@ try {
 # ---------- 第 2 条：真实复制测试（不需要界面） ----------
 $copy = $false
 try {
-  Write-Step '--- 2/5 真实复制测试 ---'
+  Write-Step '--- 2/7 真实复制测试 ---'
   $caseDir = Join-Path $stage "accept-copy-$stamp"
   $srcDir = Join-Path $caseDir 'src'
   $dstDir = Join-Path $caseDir 'dst'
@@ -101,7 +101,7 @@ try {
 $alive = $false
 $elProc = $null
 try {
-  Write-Step '--- 3/5 真程序活着 ---'
+  Write-Step '--- 3/7 真程序活着 ---'
   $buildLog = Join-Path $stage 'accept-build.log'
   $nodeExe = (Get-Command node).Source
   # 用 node 直接跑 npm-cli.js，避开 npm.cmd 的批处理壳子（壳子会把 stderr 当成本命令失败）
@@ -175,7 +175,7 @@ try {
 # ---------- 第 4 条：预览不落盘（不需要界面） ----------
 $preview = $false
 try {
-  Write-Step '--- 4/5 预览不落盘 ---'
+  Write-Step '--- 4/7 预览不落盘 ---'
   $previewCase = Join-Path $stage "accept-preview-$stamp"
   $previewSrc = Join-Path $previewCase 'src'
   $previewOut = Join-Path $previewCase 'out-empty'
@@ -211,7 +211,7 @@ try {
 # ---------- 第 5 条：拖入取路径（拖进来的文件必须真的进得来） ----------
 $dropPath = $false
 try {
-  Write-Step '--- 5/5 拖入取路径 ---'
+  Write-Step '--- 5/7 拖入取路径 ---'
   $dropTestJs = Join-Path $stage 'accept-drop-path-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-drop-path-test.js') -Destination $dropTestJs -Force
   $dropLog = Join-Path $stage 'accept-drop-path.log'
