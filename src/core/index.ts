@@ -9,3 +9,5 @@ export * from './plan';
 export * from './copyFiles';
 export * from './preview';
 export * from './expandAndPlan';
+export * from './outputDirection';
+export * from './runRecord';

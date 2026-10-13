@@ -4,11 +4,14 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   CopySummary,
+  OutputDirectionCheck,
   PreviewOutcome,
   Rule,
   RulesLoadResult,
   RulesSaveResult,
   ScanResult,
+  UndoRunOutcome,
+  UndoSummary,
 } from './core';
 
 /**
@@ -69,6 +72,19 @@ const api = {
     roots?: string[] | null,
   ): Promise<CopySummary> => ipcRenderer.invoke('files:organize', { files, roots: roots ?? null, outputDir, rules: rules ?? null }),
   openPath: (dir: string): Promise<string> => ipcRenderer.invoke('shell:openPath', dir),
+  /**
+   * 上一次整理的记录（界面上那句「上一次整理：输出到 …，成功 N 个，可撤销」）：
+   * 没有可撤销的整理时 available=false 并给一句人话原因，按钮据此变灰。
+   */
+  lastRun: (): Promise<UndoSummary> => ipcRenderer.invoke('undo:lastRun'),
+  /** 撤销上一次整理（只删记录里列出的目标路径；原文件一律不动）；幂等 */
+  undoLastRun: (): Promise<UndoRunOutcome> => ipcRenderer.invoke('undo:run'),
+  /** 开工前的输出方向校验（危险就不开工，一个字节都不写） */
+  checkOutputDirection: (input: {
+    roots?: string[] | null;
+    files?: string[] | null;
+    outputDir?: string | null;
+  }): Promise<OutputDirectionCheck> => ipcRenderer.invoke('output:check', input ?? {}),
   // 规则读写：主进程写到 Electron 的 userData 目录下的一个 JSON 文件
   loadRules: (): Promise<RulesLoadResult> => ipcRenderer.invoke('rules:load'),
   saveRules: (rules: Rule[]): Promise<RulesSaveResult> => ipcRenderer.invoke('rules:save', rules),

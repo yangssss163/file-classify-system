@@ -10,6 +10,7 @@ import { baseName, extensionOf } from './classify';
 import { activeFolderNamesOf, type RuleTable } from './rules';
 import { classifyWithMeta } from './classifyWithMeta';
 import { describeError } from './copyFiles';
+import { checkOutputDirection, type OutputDirectionCheck } from './outputDirection';
 import {
   countKeptOf,
   FOLDER_KEEP_HINT,
@@ -176,6 +177,11 @@ export interface PreviewTree {
   keepCount: number;
   /** 并进同名子文件夹的散文件个数（合计） */
   mergeCount: number;
+  /**
+   * 这一次的输出方向校验（本片新增的安全护栏）：危险时界面上要说清为什么不让开工，
+   * 「开始整理」按钮也就不可点。**校验是纯计算，一个字节都不写。**
+   */
+  outputDirection: OutputDirectionCheck;
 }
 
 /** 没选输出文件夹 / 没拖入任何文件时的提示（人话，不抛错）。 */
@@ -438,6 +444,12 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
       classifyCount,
       keepCount,
       mergeCount,
+      // 输出方向校验：与「开始整理」用的是**同一个函数**，所以「预览说不让开工、点了却做了」不可能发生。
+      outputDirection: checkOutputDirection({
+        roots,
+        files,
+        outputDir: String(outputDir),
+      }),
     },
   };
 }

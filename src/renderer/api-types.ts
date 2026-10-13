@@ -143,6 +143,8 @@ export interface PreviewTree {
   keepCount: number;
   /** 并进同名子文件夹的散文件个数（合计） */
   mergeCount: number;
+  /** 这一次的输出方向校验：危险时界面上要说清为什么不让开工，「开始整理」也就不可点 */
+  outputDirection: OutputDirectionCheck;
 }
 
 /** 被跳过的路径与原因（展开文件夹时）。 */
@@ -210,6 +212,14 @@ export interface CopySummary {
   }[];
   /** 被跳过的路径与原因（空文件夹不算，它只是不产生输出） */
   skipped: { fullPath: string; reason: string; name?: string }[];
+  /** 本次复制出来的文件的目标路径（只有成功的那些）—— 撤销时只删这些 */
+  writtenFiles: string[];
+  /** 本次由程序（新）创建出来的目录 */
+  createdDirs: string[];
+  /** 输出方向被拦下时为 true：这次一个字节都没写 */
+  blocked: boolean;
+  blockedReason: string | null;
+  direction: OutputDirectionCheck | null;
 }
 
 /** 整理过程中一次次回报的进度。 */
@@ -224,6 +234,84 @@ export interface OrganizeProgress {
     renamed: boolean;
     error: string | null;
   };
+}
+
+/* ---------------- 输出方向校验 + 撤销上一次整理（本片新增） ---------------- */
+
+/** 输出方向被拒绝的原因码（机器可判；界面只用人话那一段）。 */
+export type OutputDirectionReason =
+  | 'output-is-source'
+  | 'output-inside-source'
+  | 'output-is-source-parent'
+  | 'output-is-file-folder'
+  | 'no-output-dir'
+  | 'no-files';
+
+/**
+ * 开工前的输出方向校验结论。
+ * `ok=false` 时 `message` 是一句能直接给用户看的人话（说清为什么危险、所以一个字节都没写）。
+ */
+export interface OutputDirectionCheck {
+  ok: boolean;
+  reason: OutputDirectionReason | null;
+  message: string;
+  sourceRoots: string[];
+  fileDirs: string[];
+  outputDir: string;
+}
+
+/** 界面上那份「上一次整理」的摘要（决定撤销按钮可不可点）。 */
+export interface UndoSummary {
+  /** 有可撤销的整理时才是 true；否则按钮不可点，`reason` 说清为什么 */
+  available: boolean;
+  reason: string;
+  outputDir: string;
+  fileCount: number;
+  dirCount: number;
+  successCount: number;
+  failureCount: number;
+  failureNote: string;
+  finishedAt: string;
+  undoneAt: string | null;
+  /** 界面上那一句（如「上一次整理：输出到 …，成功 N 个，可撤销」） */
+  message: string;
+}
+
+/** 撤销时一个文件 / 一个目录的处置结果。 */
+export interface UndoFileOutcome {
+  target: string;
+  source: string;
+  action: 'deleted' | 'skipped';
+  reason: string;
+}
+
+export interface UndoDirOutcome {
+  dir: string;
+  action: 'removed' | 'skipped';
+  reason: string;
+}
+
+/** 撤销报告（人话 + 机器可判的数字）。 */
+export interface UndoResult {
+  ok: boolean;
+  clean: boolean;
+  changed: boolean;
+  message: string;
+  outputDir: string;
+  plannedFiles: number;
+  plannedDirs: number;
+  deletedFiles: number;
+  skippedFiles: number;
+  removedDirs: number;
+  skippedDirs: number;
+  files: UndoFileOutcome[];
+  dirs: UndoDirOutcome[];
+}
+
+/** 点一次「撤销上一次整理」的结果。 */
+export interface UndoRunOutcome {
+  result: UndoResult;
+  summary: UndoSummary;
 }
 
 /** 修改时间的三种分档。 */
@@ -291,5 +379,18 @@ export interface OrganizerApi {
   saveRules(rules: Rule[]): Promise<RulesSaveResult>;
   /** 规则文件路径（只用于显示） */
   rulesPath(): Promise<string>;
+  /**
+   * 上一次整理的记录（界面上那句「上一次整理：输出到 …，成功 N 个，可撤销」）。
+   * 没有可撤销的整理时 available=false 并给一句人话原因，按钮据此变灰。
+   */
+  lastRun(): Promise<UndoSummary>;
+  /** 撤销上一次整理：只删记录里列出的目标路径，原文件一律不动；幂等（撤过一次再点不删任何东西） */
+  undoLastRun(): Promise<UndoRunOutcome>;
+  /** 开工前的输出方向校验（危险就不开工，一个字节都不写） */
+  checkOutputDirection(input: {
+    roots?: string[] | null;
+    files?: string[] | null;
+    outputDir?: string | null;
+  }): Promise<OutputDirectionCheck>;
   onProgress(handler: (p: OrganizeProgress) => void): void;
 }

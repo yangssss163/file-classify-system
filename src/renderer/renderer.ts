@@ -6,6 +6,7 @@ import type {
   ModTimeBucket,
   OrganizeProgress,
   OrganizerApi,
+  OutputDirectionCheck,
   PreviewOutcome,
   PreviewSourceFolder,
   PreviewSubFolder,
@@ -13,6 +14,7 @@ import type {
   Rule,
   ScanResult,
   SkippedPath,
+  UndoSummary,
 } from './api-types';
 
 declare global {
@@ -108,6 +110,11 @@ const el = {
   ruleLoad: getEl<HTMLButtonElement>('rule-load'),
   ruleList: getEl<HTMLDivElement>('rule-list'),
   ruleStatus: getEl<HTMLParagraphElement>('rule-status'),
+  // 撤销上一次整理（本片新增）
+  undo: getEl<HTMLButtonElement>('undo'),
+  undoHint: getEl<HTMLSpanElement>('undo-hint'),
+  undoWarning: getEl<HTMLParagraphElement>('undo-warning'),
+  undoReport: getEl<HTMLDivElement>('undo-report'),
 };
 
 /**
@@ -115,6 +122,20 @@ const el = {
  * 只有真的看到了预览树才显示。
  */
 const PREVIEW_WARNING = '以下是预览，还没有复制任何文件：原文件、输出文件夹都保持原样。';
+
+/**
+ * 输出方向校验（本片新增的安全护栏）当前结论。
+ * 危险时：预览区写出那句人话理由，「开始整理」按钮**不可点**（按钮和后台各拦一道）。
+ * 下面是内存里的兜底结论（没有任何名单/输出目录时就是它），真结论由主进程算（与写盘用的是同一个函数）。
+ */
+let gateCheck: OutputDirectionCheck = {
+  ok: false,
+  reason: 'no-files',
+  message: '还没有可整理的文件，先拖进来或点「选择文件」「选择文件夹」。',
+  sourceRoots: [],
+  fileDirs: [],
+  outputDir: '',
+};
 
 /** 界面状态：单选的文件名单 + 拖入/选中的源文件夹名单（两者分开记，各归各）。 */
 let selectedFiles: string[] = [];
@@ -126,6 +147,8 @@ let scanResult: ScanResult | null = null;
 let skippedPaths: SkippedPath[] = [];
 let outputDir: string | null = null;
 let running = false;
+/** 「开始整理」是不是被输出方向校验挡住了（挡住就不可点）。 */
+let startBlocked = false;
 
 function notice(msg: string): void {
   el.notice.textContent = msg;
@@ -380,98 +403,40 @@ function collapsible(
   return { box, body, head, text };
 }
 
-/** 一份源文件夹下面的一个分类夹（如 01_图片 —— 2 个文件；只装这一层根下的散文件）。 */
+/** 一份源文件夹下面的一个分类夹（如 01_图片）—— 预览里只有树，不写任何统计旁白。 */
 function categoryBlock(group: { folder: string; count: number; files: PreviewTree['files'] }): HTMLDivElement {
-  const { box, body } = collapsible(`${group.folder}`, `${group.count} 个文件`, 'files', true, 'cat');
+  const { box, body } = collapsible(`${group.folder}`, '', 'files', true, 'cat');
   for (const f of group.files) body.appendChild(fileLine(f));
   return box;
 }
 
-/** 「原样保留」的那棵子树里的一个目录（含并进这个子文件夹的散文件）。 */
+/**
+ * 「原样保留」的那棵子树里的一个目录。
+ * 预览里**只给树**：目录名 + 里面的文件名，不再写「几个文件」「沉了几层」「为什么沉进来」那些过程说明。
+ */
 function subFolderBlock(sub: PreviewSubFolder, depth: number): HTMLDivElement {
-  const { box, body } = collapsible(
-    `${sub.name}（原样保留）`,
-    sub.count > 0 ? `${sub.count} 个文件` : '（空）',
-    'keep-files',
-    depth < 2,
-    'keep',
-  );
-  const outLine = document.createElement('div');
-  outLine.className = 'source-out';
-  outLine.textContent = `→ 原样保留到：${sub.outputPath}\\（不按规则重分）`;
-  body.appendChild(outLine);
+  const { box, body } = collapsible(`${sub.name}`, '', 'keep-files', depth < 2, 'keep');
   for (const f of sub.files) body.appendChild(fileLine(f));
-  if (sub.mergedIn && sub.mergedIn.length > 0) {
-    const note = document.createElement('div');
-    note.className = 'source-note';
-    // 一条一条写清「哪个文件这次沉进来、沉了几层」
-    note.textContent =
-      '这次沉进来的散文件（沉到没有同名的可沉才停在这一层）：' +
-      sub.mergedIn
-        .map((f, i) => {
-          const depth = (sub.sunkDepth || [])[i] ?? 0;
-          return `${f.name}（沉了 ${depth} 层）`;
-        })
-        .join('、');
-    body.appendChild(note);
-    for (let i = 0; i < sub.mergedIn.length; i++) {
-      const why = document.createElement('div');
-      why.className = 'source-note sunk-reason';
-      why.textContent = `　· ${sub.mergedIn[i].name}：${(sub.sunkReasons || [])[i] || '和这一层同名 → 沉进来'}`;
-      body.appendChild(why);
-    }
-  }
   for (const child of sub.children) body.appendChild(subFolderBlock(child, depth + 1));
   return box;
 }
 
 /**
- * 画「某个源文件夹自己那一份」：源路径 + 输出落到哪 + 几个文件。
- * 展开后分两块（最终语义：散落的文件以子文件夹优先）：
- *  - 「原样保留的子树」：子文件夹里的文件连层级一起搬；跟散文件同名的子文件夹会收下那些散文件；
- *  - 「按规则新建的分类夹」：只有这一层没有同名子文件夹时才建。
+ * 画「某个源文件夹自己那一份」下的内容（每一组 = 输出里的一个目录）：
+ * 原样保留的子树 + 这一层根下散文件的分类夹。
+ * 预览区**只给树**，不写「做了什么 / 怎么判定的」那类说明。
  */
 function sourceFolderBlock(sf: PreviewSourceFolder, depth: number): HTMLDivElement {
   const label = `${sf.name}${sf.renamed ? '（同名，已改成别的输出名）' : ''}（源：${sf.sourcePath}）`;
-  const { box, body } = collapsible(
-    label,
-    `${sf.count} 个文件（散文件 ${sf.looseCount} 个：并进同名子文件夹 ${sf.mergedCount} 个 / 按规则新建分类夹 ${sf.classifiedCount} 个）`,
-    'source-files',
-    depth === 0,
-    'source',
-  );
-  const outLine = document.createElement('div');
-  outLine.className = 'source-out';
-  outLine.textContent = `→ 输出到：${sf.outputDir}\\`;
-  body.appendChild(outLine);
-
-  if (sf.subfolders.length > 0) {
-    const note = document.createElement('div');
-    note.className = 'source-note';
-    note.textContent = '子文件夹（原样保留；跟散文件同名的那个会收下那些散文件）：';
-    body.appendChild(note);
-    for (const sub of sf.subfolders) body.appendChild(subFolderBlock(sub, 0));
-  }
-
-  if (sf.categories.length > 0) {
-    const note = document.createElement('div');
-    note.className = 'source-note';
-    note.textContent = `这一层没有同名子文件夹的散文件，按规则新建分类夹（共 ${sf.classifiedCount} 个）：`;
-    body.appendChild(note);
-    for (const g of sf.categories) body.appendChild(categoryBlock(g));
-  } else if (sf.looseCount === 0) {
-    const none = document.createElement('div');
-    none.className = 'empty';
-    none.textContent = '（这一层根下没有散文件，所以这里没有分类夹）';
-    body.appendChild(none);
-  }
+  const { box, body } = collapsible(label, '', 'source-files', depth === 0, 'source');
+  for (const sub of sf.subfolders) body.appendChild(subFolderBlock(sub, 0));
+  for (const g of sf.categories) body.appendChild(categoryBlock(g));
   return box;
 }
 
 /**
- * 画预览树。
- *  - 拖入了文件夹（tree.tracked）：**按源文件夹分组**（文件夹优先），
- *    每一份下面分两块：本层散文件按规则去的分类夹、以及原样保留的子树；
+ * 画预览树。**预览区只给树** —— 不写「做了什么 / 怎么判定的」那类说明（用户要求）。
+ *  - 拖入了文件夹（tree.tracked）：**按源文件夹分组**，每一份下面就是它在输出里的目录与文件；
  *  - 只是一堆散文件：照旧按分类列出。
  * 全程只往内存里的 DOM 写，不碰磁盘。
  */
@@ -479,15 +444,10 @@ function renderPreviewTree(tree: PreviewTree): void {
   el.previewTree.textContent = '';
 
   if (tree.tracked && Array.isArray(tree.roots) && tree.roots.length > 0) {
-    // 先把那句人话写在最上面（界面上必须明确写出来）
-    const hint = document.createElement('div');
-    hint.className = 'keep-hint';
-    hint.textContent = tree.keepHint;
-    el.previewTree.appendChild(hint);
     for (const root of tree.roots) {
       const { box, body } = collapsible(
         `${root.name}${root.renamed ? '（同名，输出里已改名）' : ''}（源：${root.path}）→ 输出根下的 ${root.outputName}\\`,
-        `共 ${root.total} 个文件`,
+        '',
         'root-files',
         true,
         'root',
@@ -506,29 +466,17 @@ function renderPreviewTree(tree: PreviewTree): void {
     const head = document.createElement('div');
     head.className = 'folder-head';
     head.textContent = `${group.files.length > 0 ? '▸' : '·'} ${group.folder}　`;
-    const count = document.createElement('span');
-    count.className = 'folder-count';
-    count.textContent = `${group.count} 个文件`;
-    head.appendChild(count);
 
     const files = document.createElement('div');
     files.className = 'files';
     files.style.display = 'none';
 
-    if (group.files.length === 0) {
-      const none = document.createElement('div');
-      none.className = 'empty';
-      none.textContent = '（这一类没有文件）';
-      files.appendChild(none);
-    } else {
-      for (const f of group.files) files.appendChild(fileLine(f));
-    }
+    for (const f of group.files) files.appendChild(fileLine(f));
 
     head.addEventListener('click', () => {
       const open = files.style.display !== 'none';
       files.style.display = open ? 'none' : 'block';
       head.textContent = `${open ? '▸' : '▾'} ${group.folder}　`;
-      head.appendChild(count);
       box.classList.toggle('hidden', open && group.files.length === 0);
     });
 
@@ -564,12 +512,77 @@ function renderPreviewSkipped(tree: PreviewTree): void {
   }
 }
 
-/** 清掉上一次预览，避免「旧预览」被误当成当前名单的结果。 */
+/**
+ * 输出方向校验：拿「这一批源文件夹 / 散文件 + 输出目录」去后台算一遍（只读，一个字节都不写）。
+ * 危险时把理由写进预览区，并让「开始整理」不可点 —— 这道关卡与主进程真正写盘前的那一道是**同一个函数**，
+ * 所以「界面说能开工、后台却拒绝」不可能发生。
+ * `files` / `roots` 由调用方显式给（免得校验用到的清单和真正要整理的那一份不是同一份）。
+ * @param label 校验完成后要说的一句人话（不传就不多说）
+ */
+async function runDirectionCheck(
+  files: readonly string[],
+  roots: readonly string[],
+  label = '',
+): Promise<OutputDirectionCheck | null> {
+  let check: OutputDirectionCheck | null = null;
+  try {
+    check = await api.checkOutputDirection({
+      roots: roots.slice(),
+      files: files.slice(),
+      outputDir,
+    });
+  } catch {
+    check = null; // 校验本身出错（拿不到结论）不阻塞：主进程写盘前还会再拦一道
+  }
+  gateCheck = check ?? {
+    ok: true,
+    reason: null,
+    message: '',
+    sourceRoots: [],
+    fileDirs: [],
+    outputDir: outputDir ?? '',
+  };
+  renderDirectionWarning();
+  if (label) notice(label);
+  return check;
+}
+
+/** 把方向结论画出来：危险就写出那句话（一字不改地照抄后台给的说明）。 */
+function renderDirectionWarning(): void {
+  const blocked = gateCheck.ok !== true;
+  if (blocked) {
+    const why =
+      gateCheck.message && gateCheck.message.trim().length > 0
+        ? gateCheck.message
+        : '输出方向不对，这次不许开工（一个字节都不会写）。';
+    el.previewWarning.textContent = `不能开工：${why}`;
+  } else if (el.previewTree.children && el.previewTree.children.length > 0) {
+    el.previewWarning.textContent = PREVIEW_WARNING;
+  }
+  // 危险时「开始整理」不可点（真点了也会被后台拦下）
+  startBlocked = blocked;
+  updateStartButton();
+}
+
+/** 「开始整理」按钮的可点状态：正在跑、或方向危险 → 不可点。 */
+function updateStartButton(): void {
+  el.start.disabled = running || startBlocked;
+}
+
+/** 名单 / 源文件夹 / 输出目录一变，就把方向校验重算一遍（免得留下过时的结论）。 */
+function refreshDirectionNow(label = ''): void {
+  void runDirectionCheck(collectFiles(), selectedRoots.slice(), label);
+}
+
+/**
+ * 清掉上一次预览，避免「旧预览」被误当成当前名单的结果。
+ * 预览区**只放树**：这里只清树与「跳过」那两块，方向警告交给 `renderDirectionWarning()` 重画。
+ */
 function clearPreview(): void {
-  el.previewWarning.textContent = '';
   el.previewSummary.textContent = '';
   el.previewTree.textContent = '';
   el.previewSkipped.textContent = '';
+  renderDirectionWarning();
 }
 
 el.preview.addEventListener('click', () => {
@@ -609,23 +622,21 @@ el.preview.addEventListener('click', () => {
 
     const tree = outcome.tree;
     el.previewWarning.textContent = PREVIEW_WARNING;
-    const notes: string[] = [];
-    if (tree.rulesApplied === true && tree.tracked !== true) notes.push(rulesSummaryText());
-    if (tree.unreadableCount > 0) notes.push(`其中 ${tree.unreadableCount} 个读不到文件信息，已标注原因`);
-    if (tree.tracked === true) {
-      // 文件夹优先：一句话说清「哪几个按规则分了、哪几个原样保留了」
-      notes.push(`来自 ${tree.rootCount} 个文件夹（共 ${tree.sourceFolderCount} 份，各归各，绝不互相混）`);
-      notes.push(`散文件 ${tree.classifyCount} 个按规则分类、子文件夹里 ${tree.keepCount} 个原样保留`);
-    }
-    if (tree.skipped && tree.skipped.length > 0) notes.push(`跳过 ${tree.skipped.length} 处`);
-    if (tree.outputDir) notes.push(`计划输出到：${tree.outputDir}`);
+    // 方向危险时：把理由覆盖上去，并让「开始整理」不可点（在下面细说）
+    if (tree.outputDirection && tree.outputDirection.ok !== true) gateCheck = tree.outputDirection;
+    // 预览区**只给树**：这里不再写「做了什么 / 几个文件 / 沉了几层 / 计划输出到哪」那类说明旁白。
+    // 拦事故的那几样仍然照旧显示：方向危险那句警告（下面）、读不到文件与被跳过的原因（树里 + 下面那块）。
+    // 例外的只有散文件这一趟：那句话说清「预览用的是当前规则（共 N 条）」（规则编辑器那条验收钉着它）。
     el.previewSummary.textContent =
-      (tree.tracked === true
-        ? `共 ${tree.total} 个文件`
-        : `共 ${tree.total} 个文件，会分到 ${tree.folders.filter((g) => g.count > 0).length} 个分类文件夹`) +
-      (notes.length > 0 ? `（${notes.join('；')}）` : '');
+      tree.rulesApplied === true && tree.tracked !== true ? rulesSummaryText() : '';
     renderPreviewTree(tree);
     renderPreviewSkipped(tree);
+    // 最后一步再画方向警告：这时预览树已经画好，危险的那句话不会被后续赋值盖掉
+    renderDirectionWarning();
+    if (tree.outputDirection && tree.outputDirection.ok !== true) {
+      notice('输出方向危险：这次不许开工，一个字节都没写。请换一个跟源文件夹无关的输出文件夹。');
+      return;
+    }
     notice('预览完成：这一步没有写任何文件');
   })();
 });
@@ -704,7 +715,11 @@ function rulesForUse(): Rule[] {
   }));
 }
 
-/** 一眼看出「预览用的是当前规则」。 */
+/**
+ * 一眼看出「预览用的是当前规则」。
+ * 只在**散文件那一趟**写出来（拖入文件夹那一趟预览区只给树，不写这类说明旁白）——
+ * 第 7 条验收（规则编辑器）钉着这句话，所以它不能删。
+ */
 function rulesSummaryText(): string {
   return `预览用的是当前规则（共 ${currentRules.length} 条，从上往下第一条命中生效）`;
 }
@@ -1125,7 +1140,8 @@ el.pickOut.addEventListener('click', () => {
       outputDir = dir;
       renderOutDir();
       invalidatePreview();
-      notice('输出文件夹已选定');
+      // 换了输出目录 = 方向可能变了：立刻重算一遍，危险的话「开始整理」马上变灰
+      await runDirectionCheck(collectFiles(), selectedRoots.slice(), '输出文件夹已选定（已顺手校验输出方向）');
     }
   })();
 });
@@ -1165,6 +1181,16 @@ el.start.addEventListener('click', () => {
     const roots = selectedRoots.slice();
     const out = outputDir;
     const rules = rulesForUse();
+
+    // 最后一道出口校验：方向危险 → 直接拒绝，不调 organize（一个字节都不会写）
+    const before = await runDirectionCheck(files, roots, '');
+    if (before && before.ok !== true) {
+      const why = before.message && before.message.trim().length > 0 ? before.message : '输出方向不对';
+      notice(`不能开工：${why}`);
+      el.summary.textContent = '没有开始整理：输出方向危险，一个字节都没写。';
+      return;
+    }
+
     running = true;
     el.start.disabled = true;
     el.list.textContent = '';
@@ -1197,13 +1223,130 @@ el.start.addEventListener('click', () => {
       }
       mergeSkipped((summary.skipped ?? []).map((s) => ({ fullPath: s.fullPath, reason: s.reason, name: s.name, originKey: '' })));
       notice(`输出目录：${summary.outputDir}`);
+      // 本次整理已经记下来了（记录在主进程 userData 下）：刷新「撤销上一次整理」那一段
+      if (summary.blocked === true) {
+        notice(`不能开工：${summary.blockedReason ?? '输出方向不对'}`);
+        gateCheck = summary.direction ?? gateCheck;
+        renderDirectionWarning();
+      } else {
+        await refreshUndo();
+      }
     } catch (err) {
       notice(`整理中断：${(err as Error)?.message ?? '未知错误'}`);
       el.summary.textContent = '整理完成：成功 0 个，失败 0 个（本次未跑完）';
     } finally {
       running = false;
-      el.start.disabled = false;
+      updateStartButton();
     }
+  })();
+});
+
+/* ---------------- 撤销上一次整理（本片新增） ----------------
+ * 界面只负责「问一句 → 调一次 → 把人话报告摆出来」；真正删什么、不删什么全在 core/runRecord.ts。
+ * 记录是持久化的（主进程 userData 下的 JSON），所以**关掉程序再打开，仍然能撤销上一次整理**。
+ */
+
+/** 撤销按钮当前指向的这一次记录（界面上要写「输出目录」；主进程给的最新摘要）。 */
+let currentUndo: { count: number; outputDir: string } = { count: 0, outputDir: '' };
+
+/** 窗口内的二次确认：**问不出来就不删**（宁可少删，也不许不明不白地删）。 */
+function confirmUndo(warn: string): boolean {
+  try {
+    return window.confirm(warn) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** 撤销区的状态是否与记录一致：没有可撤销的整理 → 按钮不可点 + 说清原因。 */
+function renderUndoSummary(summary: UndoSummary | null): void {
+  const undoSpan = el.undoHint;
+  if (!summary || summary.available !== true) {
+    el.undo.disabled = true;
+    undoSpan.className = 'undo-hint';
+    undoSpan.textContent = summary && summary.reason ? summary.reason : '没有可撤销的整理';
+    return;
+  }
+  el.undo.disabled = false;
+  undoSpan.className = 'undo-hint undo-available';
+  undoSpan.textContent = summary.message;
+}
+
+/** 拉一次「上一次整理」的摘要（启动时、整理完成后、撤销完成后各一次），并把警告要用的数字记下来。 */
+async function refreshUndo(): Promise<void> {
+  let summary: UndoSummary | null = null;
+  try {
+    summary = await api.lastRun();
+  } catch {
+    summary = null;
+  }
+  currentUndo = {
+    count: summary && typeof summary.fileCount === 'number' ? summary.fileCount : 0,
+    outputDir: summary && summary.outputDir ? summary.outputDir : '',
+  };
+  renderUndoSummary(summary);
+}
+
+/** 撤销报告：一句总结 + 一条一条明细（删了的、跳过的都在）。 */
+function renderUndoReport(result: {
+  message: string;
+  files: { target: string; action: string; reason: string }[];
+  dirs: { dir: string; action: string; reason: string }[];
+}): void {
+  el.undoReport.textContent = '';
+  const head = document.createElement('div');
+  head.className = 'item undo-head';
+  head.textContent = result.message;
+  el.undoReport.appendChild(head);
+  for (const f of result.files ?? []) {
+    const line = document.createElement('div');
+    line.className = f.action === 'deleted' ? 'item undo-deleted' : 'item undo-skipped';
+    line.textContent = `[${f.action === 'deleted' ? '删除' : '跳过'}] ${f.target} —— ${f.reason}`;
+    el.undoReport.appendChild(line);
+  }
+  for (const d of result.dirs ?? []) {
+    const line = document.createElement('div');
+    line.className = d.action === 'removed' ? 'item undo-deleted' : 'item undo-skipped';
+    line.textContent = `[${d.action === 'removed' ? '清掉目录' : '跳过目录'}] ${d.dir} —— ${d.reason}`;
+    el.undoReport.appendChild(line);
+  }
+}
+
+listen(el.undo, 'click', () => {
+  void (async () => {
+    if (el.undo.disabled) return;
+    // 点之前给一句明确警告：只会删这次复制到输出目录的那 N 个文件，原文件不动（窗口内二次确认）
+    const n = currentUndo.count;
+    const warn =
+      `要点「确定」才会动手：只会删掉这次复制到输出目录的那 ${n} 个文件` +
+      `（输出目录：${currentUndo.outputDir}），以及由程序创建、撤销后变空的目录；` +
+      `原文件一个都不会动。整理之后你自己加过或改过的文件会被跳过。`;
+    el.undoWarning.textContent = warn;
+    if (!confirmUndo(warn)) return;
+
+    el.undo.disabled = true;
+    let outcome: { result: unknown; summary: unknown } | null = null;
+    try {
+      outcome = await api.undoLastRun();
+    } catch (err) {
+      el.undoWarning.textContent = `撤销失败：${(err as Error)?.message ?? '未知错误'}（没有删掉东西）`;
+      await refreshUndo();
+      return;
+    }
+    const result = (outcome?.result ?? null) as {
+      message: string;
+      files: { target: string; action: string; reason: string }[];
+      dirs: { dir: string; action: string; reason: string }[];
+    } | null;
+    if (!result) {
+      el.undoWarning.textContent = '撤销没有结果，请看下面的记录';
+      await refreshUndo();
+      return;
+    }
+    renderUndoReport(result);
+    el.undoWarning.textContent = '';
+    renderUndoSummary((outcome?.summary ?? null) as UndoSummary | null);
+    notice(result.message);
   })();
 });
 
@@ -1211,3 +1354,8 @@ refreshCounts();
 renderOutDir();
 // 启动时自动读上次保存的规则（读不到就默认规则 + 人话提示，这里绝不崩）
 void initRules();
+// 启动时顺手报一次「上一次整理」的状态：有可撤销的 → 按钮可点；没有 / 已撤过 → 按钮不可点 + 说清原因。
+// 记录在主进程 userData 下（持久化），所以关掉程序再打开，上一次整理仍然可撤。
+void refreshUndo();
+// 方向校验：界面刚起来时名单是空的，先算一遍（结论就是「还没有可整理的文件」）
+refreshDirectionNow();

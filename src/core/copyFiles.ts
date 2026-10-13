@@ -4,6 +4,10 @@
  * 铁律：只复制，不移动，绝不删除原文件。
  *  - 复制用 COPYFILE_EXCL，目标已存在一律不覆盖，改为换名。
  *  - 单个文件出错只记这一条失败，继续处理后面的文件，不抛出去、不中断整批。
+ *  - **开工前先校验输出方向**（见 `outputDirection.ts`）：方向危险就一个字节都不写，
+ *    把拒绝原因原样带回去（`blocked`）。
+ *  - 传了 `recordPath` 就把这一次整理记下来（`runRecord.ts`）：本次复制成功的每个目标路径、
+ *    新建的目录、成功/失败数 —— 之后才能「撤销上一次整理」。
  */
 import * as fs from 'fs/promises';
 import * as fssync from 'fs';
@@ -12,6 +16,8 @@ import { defaultRules, type RuleTable } from './rules';
 import { classifyWithMeta } from './classifyWithMeta';
 import { pickUniqueName, MAX_RENAME_ATTEMPTS } from './classify';
 import { planFolders, type PlanResult } from './expandAndPlan';
+import { checkOutputDirection, isInsideDir, sameDir, type OutputDirectionCheck } from './outputDirection';
+import { saveRunRecord, type RunRecord, type RunRecordFailure, type RunRecordFile } from './runRecord';
 
 export interface CopyFileResult {
   /** 原文件路径 */
@@ -51,6 +57,22 @@ export interface CopySummary {
   }>;
   /** 「源文件夹各归各」时：被跳过的路径与原因（空文件夹不算，它只是不产生输出） */
   skipped: Array<{ path: string; reason: string; name?: string }>;
+  /** 本次复制出来的文件的目标路径（只有成功的那些）—— 撤销时只删这些 */
+  writtenFiles: string[];
+  /** 本次由程序（新）创建出来的目录 */
+  createdDirs: string[];
+  /** 输出方向被拦下时为 true：这次**一个字节都没写**，`blockedReason` 说清为什么 */
+  blocked: boolean;
+  /** 被拦下的原因（人话）；没被拦下时为 null */
+  blockedReason: string | null;
+  /** 输出方向校验的完整结论（界面上要说清为什么不让开工） */
+  direction: OutputDirectionCheck | null;
+  /** 记录文件的路径（没传就不记）；记录写失败时为那句人话 */
+  recordPath: string | null;
+  /** 记录（本次整理的账本）—— 传了 `recordPath` 才有 */
+  record: RunRecord | null;
+  /** 记录落盘失败时的人话（成功时为 null） */
+  recordError: string | null;
 }
 
 export interface CopyOptions {
@@ -74,6 +96,50 @@ export interface CopyOptions {
   rules?: RuleTable | null;
   /** 每处理完一个文件回调一次，用于界面进度 */
   onProgress?: (done: number, total: number, result: CopyFileResult) => void;
+  /**
+   * 记录文件路径（userData 下的 `organizer-last-run.json`，验收用临时路径）。
+   * 传了它就把这次整理记下来，之后能「撤销上一次整理」；不传就只复制、不记账。
+   */
+  recordPath?: string | null;
+  /** 开始/结束时间由调用方给（验收要断言时间字段在）；不传就用当前时间 */
+  startedAt?: string | null;
+}
+
+/** 收集一棵树里**已经存在**的目录（小写绝对路径）。用来算「这次新建了哪些目录」。 */
+async function collectExistingDirs(root: string): Promise<Set<string>> {
+  const found = new Set<string>();
+  const walk = async (dir: string): Promise<void> => {
+    let entries: import('fs').Dirent[] = [];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const child = path.join(dir, e.name);
+      found.add(child.toLowerCase());
+      await walk(child);
+    }
+  };
+  await walk(root);
+  return found;
+}
+
+/**
+ * 往上收集「这次新建的目录链」（到已经存在的目录为止），并登记到 `created`。
+ * 这样撤销时才能只清「由程序创建、且变空」的目录。
+ */
+function markCreatedChain(startDir: string, existing: Set<string>, created: Set<string>): void {
+  let cur = startDir;
+  for (let i = 0; i < 64; i++) {
+    const key = cur.toLowerCase();
+    if (existing.has(key) || created.has(key)) return;
+    created.add(key);
+    const parent = path.dirname(cur);
+    if (parent === cur || parent.length === 0) return;
+    cur = parent;
+  }
 }
 
 /** 把底层错误翻译成一句人话。 */
@@ -121,6 +187,32 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
   const files = Array.from(options.files ?? []);
   const rules = options.rules ?? defaultRules();
   const results: CopyFileResult[] = [];
+  const rootsRaw = Array.from(options.roots ?? []).map((r) => String(r)).filter((r) => r.length > 0);
+  const recordPath = options.recordPath ? String(options.recordPath) : null;
+  const startedAt = options.startedAt ? String(options.startedAt) : new Date().toISOString();
+
+  /* ---------- 开工前的第一件事：校验输出方向（危险就一个字节都不写） ----------
+   * 出口校验放在**写盘之前**，所以拒绝时输出目录连建都不会建（见 outputDirection.ts 的三条判据）。 */
+  const direction = checkOutputDirection({ roots: rootsRaw, files, outputDir });
+  if (!direction.ok) {
+    return {
+      total: files.length,
+      successCount: 0,
+      failureCount: 0,
+      results: [],
+      outputDir,
+      plannedFolders: [],
+      skipped: [],
+      writtenFiles: [],
+      createdDirs: [],
+      blocked: true,
+      blockedReason: direction.message,
+      direction,
+      recordPath,
+      record: null,
+      recordError: null,
+    };
+  }
 
   // 目标目录 → 已占用的名字（小写）。有 roots 时目标目录是「源文件夹落点 + 分类夹」，没有就是「输出根 + 分类夹」。
   const takenByDir = new Map<string, Set<string>>();
@@ -153,9 +245,8 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
     }
   >();
   let plan: PlanResult | null = null;
-  const roots = Array.from(options.roots ?? []).map((r) => String(r)).filter((r) => r.length > 0);
-  if (roots.length > 0) {
-    plan = planFolders({ roots, outputDir, rules }).plan;
+  if (rootsRaw.length > 0) {
+    plan = planFolders({ roots: rootsRaw, outputDir, rules }).plan;
     for (const f of plan.files) {
       planned.set(f.fullPath.toLowerCase(), {
         dir: f.targetDir,
@@ -171,7 +262,13 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
     }
   }
 
+  // 输出根：先看它本来在不在（记录里要写清「是不是这次新建的」），再建。
+  // 建完立刻把**已经存在**的目录全扫一遍 —— 之后 mkdir 出来的都是「这次新建的」，撤销时才可以清。
+  const rootExistedBefore = fssync.existsSync(outputDir);
   await fs.mkdir(outputDir, { recursive: true });
+  const createdDirs = new Set<string>();
+  const existingDirs = await collectExistingDirs(outputDir);
+  if (!rootExistedBefore) createdDirs.add(outputDir.toLowerCase());
 
   let done = 0;
   for (const rawSource of files) {
@@ -244,6 +341,8 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
         base.finalName = finalName;
         base.renamed = renamed;
         base.target = path.join(targetDir, finalName);
+        // 这次真的落地了：把「新建的目录链」记下来，撤销时才知道哪些目录可以清
+        markCreatedChain(targetDir, existingDirs, createdDirs);
       }
     } catch (err) {
       base.error = describeError(err);
@@ -257,6 +356,52 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
         /* 进度回调自己出错不许影响复制 */
       }
     }
+  }
+
+  /* ---------- 记账：这次到底复制出哪些文件、建了哪些目录（撤销的唯一依据） ---------- */
+  const writtenFiles: RunRecordFile[] = [];
+  for (const r of results) {
+    if (!r.ok || !r.target) continue;
+    let size = -1;
+    try {
+      size = fssync.statSync(r.target).size;
+    } catch {
+      size = -1; // 读不到大小：记 -1，撤销时只核「存在性」
+    }
+    writtenFiles.push({ source: r.source, target: r.target, size, renamed: r.renamed });
+  }
+  const failures: RunRecordFailure[] = results
+    .filter((r) => !r.ok)
+    .map((r) => ({ source: r.source, reason: r.error ?? '未知原因（这个文件不在可撤销范围内）' }));
+  const dirList = Array.from(createdDirs)
+    .map((d) => (d.toLowerCase() === outputDir.toLowerCase() ? outputDir : d))
+    .sort((a, b) => b.length - a.length);
+  const finishedAt = new Date().toISOString();
+
+  const record: RunRecord = {
+    schema: '1',
+    startedAt,
+    finishedAt,
+    outputDir,
+    sourceRoots: rootsRaw.slice(),
+    sourceFiles: files.map((f) => String(f)),
+    files: writtenFiles,
+    directories: dirList,
+    successCount: writtenFiles.length,
+    failureCount: failures.length,
+    // 失败的那些不在可撤销范围内：撤销只删「记录里列出、且确实复制成功的」目标路径
+    failureNote:
+      failures.length > 0
+        ? `本次有 ${failures.length} 个文件没复制成功，它们没有在输出里产生文件，所以不在可撤销范围内（撤销只删本次复制成功的那些）。`
+        : '本次没有失败的文件。',
+    failures,
+    undoneAt: null,
+  };
+
+  let recordError: string | null = null;
+  if (recordPath) {
+    const saved = saveRunRecord(recordPath, record);
+    if (!saved.ok) recordError = saved.message;
   }
 
   return {
@@ -277,5 +422,13 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
         }))
       : [],
     skipped: plan ? plan.skipped.map((s) => ({ path: s.fullPath, reason: s.reason, name: s.name })) : [],
+    writtenFiles: writtenFiles.map((f) => f.target),
+    createdDirs: dirList.slice(),
+    blocked: false,
+    blockedReason: null,
+    direction,
+    recordPath,
+    record,
+    recordError,
   };
 }

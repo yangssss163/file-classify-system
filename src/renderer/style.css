@@ -27,7 +27,7 @@ button.primary { font-weight: 600; }
 .notice { color: #b45309; min-height: 18px; }
 .summary { font-weight: 600; }
 
-/* 预览区：只求看得清（分类名 + 数量 + 文件名） */
+/* 预览区：只给树（目录名 + 文件名），不写任何过程说明旁白 */
 .preview-warning { color: #92400e; background: #fffbeb; border: 1px solid #fde68a; padding: 6px 10px; border-radius: 6px; margin: 6px 0; }
 .preview-tree { border: 1px solid #e4e8ee; border-radius: 6px; padding: 6px 10px; max-height: 260px; overflow: auto; }
 .preview-tree .folder { border-bottom: 1px solid #eef1f5; padding: 3px 0; }
@@ -47,7 +47,6 @@ button.primary { font-weight: 600; }
 .preview-tree .root-files { margin-left: 10px; }
 .preview-tree .source { border-left: 2px solid #dbe3ee; padding-left: 8px; margin: 3px 0; }
 .preview-tree .source-files { margin-left: 12px; }
-.preview-tree .source-out { color: #2563eb; font-size: 12px; }
 .preview-tree .cat { margin: 2px 0; }
 .preview-tree .cat-head { font-weight: 600; color: #52606d; }
 .preview-tree .cat .files { margin-left: 14px; }
@@ -75,3 +74,13 @@ button.primary { font-weight: 600; }
 .rule-count { font-weight: 600; color: #2563eb; }
 .rule-status { color: #52606d; min-height: 18px; }
 .preview-rules { color: #2563eb; font-weight: 600; }
+
+/* 撤销上一次整理：状态一句 + 警告一句 + 报告一列（只加这两小块样式，不做美化） */
+.undo-hint { color: #52606d; }
+.undo-hint.undo-available { color: #1d4ed8; font-weight: 600; }
+.danger { color: #b91c1c; font-weight: 600; }
+.danger:empty { display: none; }
+#undo-report .item.undo-deleted { color: #166534; }
+#undo-report .item.undo-skipped { color: #92400e; }
+#undo-report .item.undo-head { font-weight: 600; color: #1f2937; }
+#undo[disabled] { opacity: 0.6; cursor: not-allowed; }

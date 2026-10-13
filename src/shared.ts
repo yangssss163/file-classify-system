@@ -1,7 +1,17 @@
 /**
  * 界面与主进程之间的接口类型（只用于类型检查，运行时不加载）。
  */
-import type { CopySummary, PreviewOutcome, Rule, RulesLoadResult, RulesSaveResult, ScanResult } from './core';
+import type {
+  CopySummary,
+  OutputDirectionCheck,
+  PreviewOutcome,
+  Rule,
+  RulesLoadResult,
+  RulesSaveResult,
+  ScanResult,
+  UndoRunOutcome,
+  UndoSummary,
+} from './core';
 
 export interface OrganizeProgress {
   done: number;
@@ -39,5 +49,15 @@ export interface OrganizerApi {
   saveRules(rules: Rule[]): Promise<RulesSaveResult>;
   /** 规则文件路径（只用于显示） */
   rulesPath(): Promise<string>;
+  /** 上一次整理的记录（界面上那句「上一次整理：输出到 …，成功 N 个，可撤销」） */
+  lastRun(): Promise<UndoSummary>;
+  /** 撤销上一次整理：只删记录里列出的目标路径，原文件一律不动；幂等 */
+  undoLastRun(): Promise<UndoRunOutcome>;
+  /** 开工前的输出方向校验（危险就不开工，一个字节都不写） */
+  checkOutputDirection(input: {
+    roots?: string[] | null;
+    files?: string[] | null;
+    outputDir?: string | null;
+  }): Promise<OutputDirectionCheck>;
   onProgress(handler: (p: OrganizeProgress) => void): void;
 }

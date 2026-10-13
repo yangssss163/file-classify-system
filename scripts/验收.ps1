@@ -21,6 +21,11 @@
 #     拖入文件夹 → 界面按源文件夹分组画预览，并写出控制台定的那句说明（一字不差核对）；
 #     预览里能看出「哪条散文件沉到了哪一层、沉了几层」；
 #     含「探针有效性自检」：拿内存里现造的「只并一层、不递归往下沉」的产物必须判失败）
+#  10 撤销上一次整理  accept-undo-test.js -> 撤销OK（纯逻辑，真造临时目录与文件：
+#     正常撤销/幂等/不删用户后加的东西/不删被改过的文件/删除失败不崩/跨重启可用/绝不越界）
+#  11 输出方向        accept-output-direction-test.js -> 输出方向OK（纯逻辑 + 界面接线：
+#     输出=源、输出在源之下、输出是源的上一级 一律不许开工且一个字节都不写；
+#     正常方向允许并真跑一次；散文件只校验「输出 != 文件所在目录」；含「探针有效性自检」）
 #
 # 编码约定：全链路 UTF-8。本脚本与 node 子进程之间按 UTF-8 走，日志也是 UTF-8，
 # 所以看日志别按 GBK 解（那是乱码）。判定逻辑只看退出码 + 日志里的 ASCII 标记，与编码无关。
@@ -333,7 +338,53 @@ try {
   Write-Host "文件夹预览测试异常：$($_.Exception.Message)"
 }
 
-if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview) {
+# ---------- 第 10 条：撤销上一次整理（纯逻辑，真造临时目录与文件） ----------
+$undoOk = $false
+try {
+  Write-Step '--- 10/11 撤销上一次整理 ---'
+  $undoTestJs = Join-Path $stage 'accept-undo-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-undo-test.js') -Destination $undoTestJs -Force
+  $undoLog = Join-Path $stage 'accept-undo.log'
+  # 这条要在 npm run build 之后跑（第 3 条已经跑过 build），脚本会 require out\core\index.js。
+  # 记录一律走临时路径，绝不碰用户 userData 下真实的 organizer-last-run.json。
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node $undoTestJs *> $undoLog
+  $undoCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $undoLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "撤销测试退出码=$undoCode  日志=$undoLog"
+  if ($undoCode -eq 0 -and ((Get-Content -LiteralPath $undoLog -Encoding UTF8 -Raw) -match '撤销OK')) {
+    Write-Step '撤销OK'
+    $undoOk = $true
+  }
+} catch {
+  Write-Host "撤销测试异常：$($_.Exception.Message)"
+}
+
+# ---------- 第 11 条：输出方向（纯逻辑 + 界面接线，不依赖真窗口） ----------
+$directionOk = $false
+try {
+  Write-Step '--- 11/11 输出方向 ---'
+  $directionTestJs = Join-Path $stage 'accept-output-direction-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-output-direction-test.js') -Destination $directionTestJs -Force
+  $directionLog = Join-Path $stage 'accept-output-direction.log'
+  # 这条要在 npm run build 之后跑（第 3 条已经跑过 build）；
+  # 界面侧会把产物放进窗口式桩里真执行 —— --experimental-vm-modules 不能少。
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node --experimental-vm-modules $directionTestJs *> $directionLog
+  $directionCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $directionLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "输出方向测试退出码=$directionCode  日志=$directionLog"
+  if ($directionCode -eq 0 -and ((Get-Content -LiteralPath $directionLog -Encoding UTF8 -Raw) -match '输出方向OK')) {
+    Write-Step '输出方向OK'
+    $directionOk = $true
+  }
+} catch {
+  Write-Host "输出方向测试异常：$($_.Exception.Message)"
+}
+
+if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview -and $undoOk -and $directionOk) {
   Write-Step '验收通过'
   exit 0
 }
@@ -348,4 +399,6 @@ if (-not $ruleEngine) { $failedSteps += '规则引擎' }
 if (-not $ruleEditor) { $failedSteps += '规则编辑器' }
 if (-not $folderPlan) { $failedSteps += '文件夹各归各' }
 if (-not $folderPreview) { $failedSteps += '文件夹预览' }
+if (-not $undoOk) { $failedSteps += '撤销' }
+if (-not $directionOk) { $failedSteps += '输出方向' }
 Fail ($failedSteps -join '+')

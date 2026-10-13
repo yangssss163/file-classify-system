@@ -8,12 +8,17 @@ import * as fsp from 'fs/promises';
 import * as path from 'path';
 import {
   buildPreviewTree,
+  checkOutputDirection,
   copyFiles,
   expandFolders,
   loadRulesFromFile,
+  loadRunRecord,
   saveRulesToFile,
   setSourceRoots,
+  undoLastRun,
+  RUN_RECORD_FILE_NAME,
   RULES_FILE_NAME,
+  summarizeLastRun,
   type CopyFileResult,
   type PreviewOutcome,
   type Rule,
@@ -182,6 +187,38 @@ ipcMain.handle('rules:save', async (_event, rules: Rule[]) => {
 
 ipcMain.handle('rules:path', async (): Promise<string> => rulesFilePath());
 
+/* ---------------- 上一次整理的记录 / 撤销（本片新增） ----------------
+ * 记录放在 userData 下的 organizer-last-run.json，**跨重启可用**（关掉程序再打开，仍能撤销上一次整理）。
+ * （`DSH_RUN_RECORD_FILE` 只给验收/排查用：把记录重定向到临时目录，
+ *   免得动到用户真实的那份记录与规则文件。正常启动时这个环境变量不存在。）
+ */
+function runRecordFilePath(): string {
+  const override = process.env.DSH_RUN_RECORD_FILE;
+  if (override && override.trim().length > 0) return path.resolve(override);
+  return path.join(app.getPath('userData'), RUN_RECORD_FILE_NAME);
+}
+
+ipcMain.handle('undo:lastRun', async () => {
+  return summarizeLastRun(loadRunRecord(runRecordFilePath()));
+});
+
+ipcMain.handle('undo:run', async () => {
+  const result = undoLastRun(runRecordFilePath());
+  return { result, summary: summarizeLastRun(loadRunRecord(runRecordFilePath())) };
+});
+
+/** 开工前的输出方向校验（危险就不开工，一个字节都不写）。 */
+ipcMain.handle(
+  'output:check',
+  async (_event, payload: { roots?: string[] | null; files?: string[] | null; outputDir?: string | null }) => {
+    return checkOutputDirection({
+      roots: payload?.roots ?? [],
+      files: payload?.files ?? [],
+      outputDir: payload?.outputDir ?? '',
+    });
+  },
+);
+
 ipcMain.handle(
   'files:exists',
   async (_event, filePaths: string[]): Promise<Record<string, boolean>> => {
@@ -234,6 +271,8 @@ ipcMain.handle(
       outputDir: payload.outputDir,
       // 同一套规则：预览说哪个文件进哪个分类，执行结果必须一致
       rules: payload.rules ?? null,
+      // 记下这次复制出去的每一份（撤销的唯一依据）；写不进去只影响「能不能撤销」，不影响复制
+      recordPath: runRecordFilePath(),
       onProgress: (done, total, result: CopyFileResult) => {
         if (!sender.isDestroyed()) {
           sender.send('organize:progress', { done, total, result });
