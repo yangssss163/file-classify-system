@@ -91,3 +91,16 @@ button.primary { font-weight: 600; }
 #ai-status.ai-ready { color: #1d4ed8; }
 #ai-notice { color: #b45309; min-height: 18px; }
 #ai-notice:empty { display: none; }
+
+/* AI 设置区（本片新增：接口地址 / 密钥 / 模型名 / 测试连接；只加设置区必需样式，不做美化） */
+.ai-label { width: 60px; color: #52606d; font-size: 13px; }
+input.ai-input { flex: 1; min-width: 220px; padding: 3px 6px; font-size: 13px; }
+#ai-config-status { color: #52606d; }
+#ai-config-path { color: #7b8794; font-size: 12px; word-break: break-all; }
+#ai-config-path:empty { display: none; }
+
+/* AI 建议那一块：列出来给人看 + 「采用 / 不采用」两个按钮 */
+.ai-suggest { margin-top: 6px; }
+.ai-suggest:empty { display: none; }
+.ai-suggest-head { font-weight: 600; color: #1f2937; }
+.ai-suggest .ai-suggest-item { color: #374151; }

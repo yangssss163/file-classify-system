@@ -81,7 +81,32 @@
   </div>
   <p class="hint">点了这个按钮会<b>先撤销上一次整理</b>（只删这次复制到输出目录的那份，原文件一个都不会动），
     再换一种分法重来 —— 另一种分法就是 AI 分类。</p>
+
+  <h2>AI 设置</h2>
+  <p class="hint">填你自己的接口地址、密钥与模型名（默认按 DeepSeek 填好，也可以改成别的 OpenAI 兼容地址）。
+    <b>只把文件名、大小、修改时间发给模型：不读文件内容、不发文件内容，也不发文件所在目录。</b></p>
+  <div class="row">
+    <label class="ai-label" for="ai-endpoint">接口地址</label>
+    <input id="ai-endpoint" class="ai-input" type="text" placeholder="https://api.deepseek.com" />
+  </div>
+  <div class="row">
+    <label class="ai-label" for="ai-key">密钥</label>
+    <input id="ai-key" class="ai-input" type="password" autocomplete="off" placeholder="留空 = 不改动已保存的密钥" />
+  </div>
+  <div class="row">
+    <label class="ai-label" for="ai-model">模型名</label>
+    <input id="ai-model" class="ai-input" type="text" placeholder="deepseek-chat" />
+  </div>
+  <div class="row">
+    <button id="ai-save">保存 AI 设置</button>
+    <button id="ai-test">测试连接</button>
+    <span id="ai-config-status" class="hint">还没读设置</span>
+  </div>
+  <p class="hint"><b>密钥是明文存在这台电脑的配置文件里的，不会上传到别处，也请不要提交进代码仓库。</b>
+    （界面不会回显密钥本体，输入框是密码型；配置文件位置见下面那行。）</p>
+  <p id="ai-config-path" class="hint"></p>
   <p id="ai-notice" class="notice"></p>
+  <div id="ai-suggest" class="ai-suggest"></div>
 
   <!-- renderer.js 以 ES module 加载：编译产物里没有 CommonJS 的 exports 包装，
      所以不会有 "exports is not defined" 这种启动即崩的问题 -->

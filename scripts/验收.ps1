@@ -35,6 +35,19 @@
 #     撤销成功 + AI 未配置 → 界面说清「已撤销 N 个 + AI 分类还没配置」；真造临时目录验「输出里那份被撤掉、源文件一个没动」；
 #     再点一次只给提示、不删东西、不再调 AI；撤销返回失败 → 不继续调 AI 且如实显示撤销报告；
 #     含「探针有效性自检」：内存里现造的「先调 AI、后撤销」的产物必须判失败）
+#  14 AI 真调用        accept-ai-live-test.js -> AI真调用OK（**本机假接口服务**，不依赖外网：
+#     起一个 node 内建 http 的假服务（127.0.0.1 随机端口，形状模仿 OpenAI 兼容的 chat completions），
+#     断言请求形状（URL / Bearer 密钥 / 模型名 / body 只带文件名+大小+修改时间，**不含文件内容与目录路径**）、
+#     正常解析（分类名 → 文件名清单逐条一致）、五种坏响应全部安全失败（输出目录一个文件没多、没删、能回落规则）、
+#     分批与进度（120 个文件 → 请求不止一次、进度单调不减且最后等于 120）、重试只针对可重试的错（500 重试、400 不重试）、
+#     建议可执行（变成规则后用既有规则求值逐条核对一致，且没有第二套复制/计划实现）；
+#     含「探针有效性自检」：「把文件内容塞进请求体」「返回不合形状也当成功」的坏产物必须判失败）
+#  15 AI 配置          accept-ai-config-test.js -> AI配置OK（读写 / 缺配置 / 密钥不外泄 / 界面接线：
+#     设置保存进本机配置文件（临时路径，不污染用户真实设置）→ 读回三项一致；
+#     密钥为空 → 明确拒绝且**一个请求都不发**（假服务收到 0 次）；密钥不出现在项目目录任何文件与验收输出里；
+#     界面密钥框是密码型；产品源码里没有 sk- 开头的字符串常量；界面接线真跑产物（三个输入 + 测试连接，
+#     点保存把三项传下去、点测试连接显示成功与失败两种结果）；
+#     含「探针有效性自检」：把密钥写进项目文件里 / 输入框改成普通文本型的产物必须判失败）
 #
 # 编码约定：全链路 UTF-8。本脚本与 node 子进程之间按 UTF-8 走，日志也是 UTF-8，
 # 所以看日志别按 GBK 解（那是乱码）。判定逻辑只看退出码 + 日志里的 ASCII 标记，与编码无关。
@@ -403,10 +416,14 @@ try {
   # 这条要在 npm run build 之后跑（第 3 条已经跑过 build），脚本会 require out\core\index.js
   # 并扫 src\core 下那个 AI 分类模块的源码、编译产物与其它产品文件。
   # 全程不联网络：脚本会把全局联网入口换成会抛错的哨兵，调完之后要求哨兵一个都没被碰过。
+  # 设置一律走临时路径（DSH_AI_CONFIG_FILE）：免得这条去读用户真实保存的那份 AI 设置
+  # （真实设置存在时「配好了没有」会是 true，那属于用户自己的机器状态，不该影响这条判据）。
   $env:DSH_ACCEPT_OUT = $outDir
+  $env:DSH_AI_CONFIG_FILE = Join-Path $stage "accept-ai-config-$stamp.json"
   & node $aiStrategyTestJs *> $aiStrategyLog
   $aiStrategyCode = $LASTEXITCODE
   Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Remove-Item Env:\DSH_AI_CONFIG_FILE -ErrorAction SilentlyContinue
   Get-Content -LiteralPath $aiStrategyLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
   Write-Host "AI策略壳测试退出码=$aiStrategyCode  日志=$aiStrategyLog"
   if ($aiStrategyCode -eq 0 -and ((Get-Content -LiteralPath $aiStrategyLog -Encoding UTF8 -Raw) -match 'AI策略壳OK')) {
@@ -442,7 +459,55 @@ try {
   Write-Host "AI界面壳测试异常：$($_.Exception.Message)"
 }
 
-if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview -and $undoOk -and $directionOk -and $aiStrategyOk -and $aiUiOk) {
+# ---------- 第 14 条：AI 真调用（本机假接口服务，不依赖外网） ----------
+$aiLiveOk = $false
+try {
+  Write-Step '--- 14/15 AI 真调用 ---'
+  $aiLiveTestJs = Join-Path $stage 'accept-ai-live-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-ai-live-test.js') -Destination $aiLiveTestJs -Force
+  $aiLiveLog = Join-Path $stage 'accept-ai-live.log'
+  # 这条要在 npm run build 之后跑（第 3 条已经跑过 build），脚本会 require out\core\index.js。
+  # 全程不出本机：脚本自己起一个假的接口服务（127.0.0.1 的随机端口），把程序的接口地址指过去。
+  # 设置走临时路径，绝不碰用户真实保存的那份 AI 设置。
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node $aiLiveTestJs *> $aiLiveLog
+  $aiLiveCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $aiLiveLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "AI真调用测试退出码=$aiLiveCode  日志=$aiLiveLog"
+  if ($aiLiveCode -eq 0 -and ((Get-Content -LiteralPath $aiLiveLog -Encoding UTF8 -Raw) -match 'AI真调用OK')) {
+    Write-Step 'AI真调用OK'
+    $aiLiveOk = $true
+  }
+} catch {
+  Write-Host "AI真调用测试异常：$($_.Exception.Message)"
+}
+
+# ---------- 第 15 条：AI 配置（读写 / 缺配置 / 密钥不外泄 / 界面接线） ----------
+$aiConfigOk = $false
+try {
+  Write-Step '--- 15/15 AI 配置 ---'
+  $aiConfigTestJs = Join-Path $stage 'accept-ai-config-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-ai-config-test.js') -Destination $aiConfigTestJs -Force
+  $aiConfigLog = Join-Path $stage 'accept-ai-config.log'
+  # 这条要在 npm run build 之后跑（第 3 条已经跑过 build），脚本会读 out\renderer\renderer.js 与 out\renderer\index.html，
+  # 并把界面产物在窗口式桩里真跑一遍（点保存 / 点测试连接）。
+  # --experimental-vm-modules：要用真正的 ES module 作用域，没有它就直接判失败
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node --experimental-vm-modules $aiConfigTestJs *> $aiConfigLog
+  $aiConfigCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $aiConfigLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "AI配置测试退出码=$aiConfigCode  日志=$aiConfigLog"
+  if ($aiConfigCode -eq 0 -and ((Get-Content -LiteralPath $aiConfigLog -Encoding UTF8 -Raw) -match 'AI配置OK')) {
+    Write-Step 'AI配置OK'
+    $aiConfigOk = $true
+  }
+} catch {
+  Write-Host "AI配置测试异常：$($_.Exception.Message)"
+}
+
+if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview -and $undoOk -and $directionOk -and $aiStrategyOk -and $aiUiOk -and $aiLiveOk -and $aiConfigOk) {
   Write-Step '验收通过'
   exit 0
 }
@@ -461,4 +526,6 @@ if (-not $undoOk) { $failedSteps += '撤销' }
 if (-not $directionOk) { $failedSteps += '输出方向' }
 if (-not $aiStrategyOk) { $failedSteps += 'AI策略壳' }
 if (-not $aiUiOk) { $failedSteps += 'AI界面壳' }
+if (-not $aiLiveOk) { $failedSteps += 'AI真调用' }
+if (-not $aiConfigOk) { $failedSteps += 'AI配置' }
 Fail ($failedSteps -join '+')

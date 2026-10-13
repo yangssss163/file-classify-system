@@ -62,11 +62,58 @@ export interface OrganizerApi {
     outputDir?: string | null;
   }): Promise<OutputDirectionCheck>;
   /**
-   * 「换一种分法：AI 分类」那两件事的通道（界面只能走这里）。
-   * `aiStatus()` 给界面上那行常显状态；`aiClassify()` 调一次 AI 分类。
-   * 本片只搭壳：不联网络、不读密钥、不写盘；实现只有 core/aiClassify.ts 一处。
+   * 「换一种分法：AI 分类」那几件事的通道（界面只能走这里）。
+   * 真实现只有 core/aiClassify.ts 一处：配置读写、真请求、分批/超时/重试、解析、测试连接、
+   * 「AI 建议 → 规则」。**密钥只存在 userData 下的配置文件里，界面只回报「有没有」，不回显内容。**
    */
   aiStatus(): Promise<AiStatus>;
+  /** 读 AI 设置（密钥不回显） */
+  aiConfigLoad(): Promise<AiConfigView>;
+  /** 存 AI 设置（写进 userData 下的配置文件；留空密钥 = 沿用原来那份） */
+  aiConfigSave(input: { endpoint: string; model: string; authToken: string }): Promise<{
+    ok: boolean;
+    message: string;
+    config: AiConfigView;
+  }>;
+  /** 「测试连接」：用界面上填的三项直接试一次（只发一次请求，不重试） */
+  aiConfigTest(input: { endpoint: string; model: string; authToken: string }): Promise<{
+    ok: boolean;
+    message: string;
+  }>;
+  /** 把 AI 建议变成既有规则表里的规则（界面据此让人确认，再走既有管线落盘） */
+  aiSuggestRules(
+    assignments: unknown[],
+    rules?: Rule[] | null,
+    seed?: string | null,
+  ): Promise<AiRuleOutcome>;
   aiClassify(filePaths: string[], outputDir?: string | null): Promise<AiClassifyResult>;
+  /** AI 分类的分批进度 */
+  onAiProgress(handler: (p: AiProgress) => void): void;
   onProgress(handler: (p: OrganizeProgress) => void): void;
+}
+
+/** 界面上「AI 设置」那一段看到的形状（**密钥本体不回显**）。 */
+export interface AiConfigView {
+  endpoint: string;
+  model: string;
+  hasKey: boolean;
+  keyLength: number;
+  configPath: string;
+  /** 界面上要照抄的那句提醒：密钥明文存在本机配置文件里、别提交进代码仓库 */
+  pathWarning: string;
+  /** 界面上要照抄的那句提醒：只发文件名/大小/修改时间，不读也不发文件内容 */
+  metadataWarning: string;
+}
+
+/** 「AI 建议 → 规则」的结果：规则表 + 按既有规则求值算出的落点。 */
+export interface AiRuleOutcome {
+  rules: Rule[];
+  checks: { source: string; category: string }[];
+  message: string;
+}
+
+/** AI 分类的分批进度。 */
+export interface AiProgress {
+  done: number;
+  total: number;
 }

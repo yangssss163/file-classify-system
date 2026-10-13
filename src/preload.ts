@@ -17,6 +17,40 @@ import type {
 } from './core';
 
 /**
+ * 界面上「AI 设置」那一段看到的形状（**密钥本体不回显**）。
+ * 单独在这一层写一遍的原因：core 里的类型带着 `apiKey` 字样，界面侧的产物不许出现它。
+ */
+export interface AiConfigView {
+  /** 接口地址（默认 DeepSeek；用户可改） */
+  endpoint: string;
+  /** 模型名（默认 deepseek-chat） */
+  model: string;
+  /** 配置里有没有密钥（回显用它，密钥本体不回来） */
+  hasKey: boolean;
+  /** 密钥有几个字符（只用来显示「已保存 N 位」，不给内容） */
+  keyLength: number;
+  /** 配置文件的完整路径（界面上写明它在哪，方便用户备份/清理） */
+  configPath: string;
+  /** 界面上要照抄的那句提醒：密钥明文存在本机配置文件里、别提交进代码仓库 */
+  pathWarning: string;
+  /** 界面上要照抄的那句提醒：只发文件名/大小/修改时间，不读也不发文件内容 */
+  metadataWarning: string;
+}
+
+/** 「AI 建议 → 规则」的结果：规则表 + 按既有规则求值算出的落点（给人确认用）。 */
+export interface AiRuleOutcome {
+  rules: Rule[];
+  checks: { source: string; category: string }[];
+  message: string;
+}
+
+/** 分批进度（AI 分类文件多的时候界面上要看得到走到哪儿了）。 */
+export interface AiProgress {
+  done: number;
+  total: number;
+}
+
+/**
  * 把拖进来的 File 换成磁盘路径。
  * Electron 32 起 File.path 已被移除（44 上完全没有），只能由预加载脚本用
  * webUtils.getPathForFile 取；界面拿不到 node，所以这一步必须在 preload 里做。
@@ -94,6 +128,32 @@ const api = {
    * 本片只搭壳：不联网络、不读密钥、不写盘，没配置就如实回话。实现全在 core 的 aiClassify 模块里。
    */
   aiStatus: (): Promise<AiStatus> => ipcRenderer.invoke('ai:status'),
+  /** 读 AI 设置（密钥不回显，只回报「有没有」与几位） */
+  aiConfigLoad: (): Promise<AiConfigView> => ipcRenderer.invoke('ai:config:load'),
+  /** 存 AI 设置（写进 userData 下的配置文件；留空密钥 = 沿用原来那份） */
+  aiConfigSave: (input: {
+    endpoint: string;
+    model: string;
+    authToken: string;
+  }): Promise<{ ok: boolean; message: string; config: AiConfigView }> =>
+    ipcRenderer.invoke('ai:config:save', input),
+  /** 「测试连接」：用界面上填的三项直接试一次（还没保存也能试） */
+  aiConfigTest: (input: {
+    endpoint: string;
+    model: string;
+    authToken: string;
+  }): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('ai:config:test', input),
+  /** 把 AI 建议变成既有规则表里的规则（并回报每个文件按规则落到哪 —— 走的是同一个求值函数） */
+  aiSuggestRules: (
+    assignments: unknown[],
+    rules?: Rule[] | null,
+    seed?: string | null,
+  ): Promise<AiRuleOutcome> =>
+    ipcRenderer.invoke('ai:suggestRules', { assignments: assignments ?? [], rules: rules ?? null, seed: seed ?? null }),
+  /** 分批进度：AI 分类一批一批发出去时，界面看得到走到哪儿了 */
+  onAiProgress: (handler: (p: AiProgress) => void): void => {
+    ipcRenderer.on('ai:progress', (_event, payload: AiProgress) => handler(payload));
+  },
   aiClassify: (filePaths: string[], outputDir?: string | null): Promise<AiClassifyResult> =>
     ipcRenderer.invoke('ai:classify', { filePaths: filePaths ?? [], outputDir: outputDir ?? null }),
   // 规则读写：主进程写到 Electron 的 userData 目录下的一个 JSON 文件

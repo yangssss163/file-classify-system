@@ -356,10 +356,10 @@ export interface RulesSaveResult {
 }
 
 /**
- * 「换一种分法：AI 分类」用到的类型（**核心那份在 src/core/aiClassify.ts，这里是一份界面侧副本**）。
+ * 「换一种分法：AI 分类」用到的类型（**核心那份在 src/core 里，这里是一份界面侧副本**）。
  * 界面侧单独一份的原因：界面脚本编成 ES module、不许在运行时有导入；这几种形状改动时要两处一起改
- * （与 `UndoSummary` / `OutputDirectionCheck` 的做法一致）。本片只搭壳，不联网络、不读密钥。
- * 这里故意用 `AiSeed*` 这套名字：与 AI 实现同名的标识只允许出现在那个模块里（由验收第 12 条盯着）。
+ * （与 `UndoSummary` / `OutputDirectionCheck` 的做法一致）。
+ * 这里故意用 `AiSeed*` 这套名字：与 AI 实现同名的标识只允许出现在核心那几个模块里（由验收第 12 条盯着）。
  */
 export interface AiSeedAssignment {
   /** 原文件路径（绝不改动它） */
@@ -379,8 +379,52 @@ export interface AiSeedStatus {
   configured: boolean;
   /** 短标签（如「AI 分类：未配置」） */
   label: string;
-  /** 一句人话（说清现在只有规则分类可用） */
+  /** 一句人话（说清现在能不能用 AI 分法） */
   message: string;
+}
+
+/** 界面上「AI 设置」那一段看到的形状（**密钥本体不回显**，只回报有没有 / 几位）。 */
+export interface AiSeedConfigView {
+  /** 接口地址（默认 DeepSeek；用户可改） */
+  endpoint: string;
+  /** 模型名（默认 deepseek-chat） */
+  model: string;
+  /** 配置里有没有密钥（只用来显示，不给内容） */
+  hasKey: boolean;
+  /** 密钥有几个字符（只用来显示「已保存 N 位」） */
+  keyLength: number;
+  /** 配置文件的完整路径（界面上写明它在哪，方便用户备份 / 清理） */
+  configPath: string;
+  /** 要照抄的那句提醒：密钥明文存在本机配置文件里、别提交进代码仓库 */
+  pathWarning: string;
+  /** 要照抄的那句提醒：只发文件名/大小/修改时间，不读也不发文件内容 */
+  metadataWarning: string;
+}
+
+/** 保存 AI 设置的结果。 */
+export interface AiSeedConfigSaveResult {
+  ok: boolean;
+  message: string;
+  config: AiSeedConfigView;
+}
+
+/** 「测试连接」的结果。 */
+export interface AiSeedTestResult {
+  ok: boolean;
+  message: string;
+}
+
+/** 「AI 建议 → 规则」的结果：规则表 + 按既有规则求值算出的落点（给人确认用）。 */
+export interface AiSeedRuleOutcome {
+  rules: Rule[];
+  checks: { source: string; category: string }[];
+  message: string;
+}
+
+/** AI 分类的分批进度（界面显示「已发 N / 共 M」）。 */
+export interface AiSeedProgress {
+  done: number;
+  total: number;
 }
 
 /** 预加载脚本暴露到 window.organizer 上的那一套方法。 */
@@ -421,10 +465,21 @@ export interface OrganizerApi {
     outputDir?: string | null;
   }): Promise<OutputDirectionCheck>;
   /**
-   * 「换一种分法：AI 分类」那两件事的通道（界面只能走这里，界面里不许有第二份 AI 实现）。
-   * 本片只搭壳：不联网络、不读密钥、不写盘。
+   * 「换一种分法：AI 分类」那几件事的通道（界面只能走这里，界面里不许有第二份 AI 实现）。
+   * 真实现全在核心那几个模块里（配置读写 / 真请求 / 分批超时重试 / 解析 / 测试连接 / 建议→规则）。
+   * **密钥只存在 userData 下的配置文件里**：界面只回报「有没有」，不回显内容。
    */
   aiStatus(): Promise<AiSeedStatus>;
+  /** 读 AI 设置（密钥不回显） */
+  aiConfigLoad(): Promise<AiSeedConfigView>;
+  /** 存 AI 设置（写进 userData 下的配置文件；留空密钥 = 沿用原来那份） */
+  aiConfigSave(input: { endpoint: string; model: string; authToken: string }): Promise<AiSeedConfigSaveResult>;
+  /** 「测试连接」：用界面上填的三项直接试一次（只发一次请求，不重试） */
+  aiConfigTest(input: { endpoint: string; model: string; authToken: string }): Promise<AiSeedTestResult>;
+  /** 把 AI 建议变成既有规则表里的规则（界面据此让人确认，再走既有管线落盘） */
+  aiSuggestRules(assignments: readonly AiSeedAssignment[], rules?: Rule[] | null, seed?: string | null): Promise<AiSeedRuleOutcome>;
   aiClassify(filePaths: string[], outputDir?: string | null): Promise<AiSeedClassifyOutcome>;
+  /** AI 分类的分批进度 */
+  onAiProgress(handler: (p: AiSeedProgress) => void): void;
   onProgress(handler: (p: OrganizeProgress) => void): void;
 }

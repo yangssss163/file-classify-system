@@ -3,6 +3,11 @@
  * 全程不阻塞：复制是异步的，进程里逐个回报进度。
  */
 import type {
+  AiSeedAssignment,
+  AiSeedClassifyOutcome,
+  AiSeedConfigView,
+  AiSeedProgress,
+  AiSeedRuleOutcome,
   AiSeedStatus,
   ModTimeBucket,
   OrganizeProgress,
@@ -116,10 +121,19 @@ const el = {
   undoHint: getEl<HTMLSpanElement>('undo-hint'),
   undoWarning: getEl<HTMLParagraphElement>('undo-warning'),
   undoReport: getEl<HTMLDivElement>('undo-report'),
-  // 换一种分法：AI 分类（本片只搭壳）
+  // 换一种分法：AI 分类（本片接上真实现）
   aiReclassify: getEl<HTMLButtonElement>('ai-reclassify'),
   aiStatus: getEl<HTMLSpanElement>('ai-status'),
   aiNotice: getEl<HTMLParagraphElement>('ai-notice'),
+  aiSuggest: getEl<HTMLDivElement>('ai-suggest'),
+  // AI 设置（本片新增：接口地址 / 密钥 / 模型名 / 测试连接）
+  aiEndpoint: getEl<HTMLInputElement>('ai-endpoint'),
+  aiKey: getEl<HTMLInputElement>('ai-key'),
+  aiModel: getEl<HTMLInputElement>('ai-model'),
+  aiSave: getEl<HTMLButtonElement>('ai-save'),
+  aiTest: getEl<HTMLButtonElement>('ai-test'),
+  aiConfigStatus: getEl<HTMLSpanElement>('ai-config-status'),
+  aiConfigPath: getEl<HTMLParagraphElement>('ai-config-path'),
 };
 
 /**
@@ -1355,7 +1369,161 @@ listen(el.undo, 'click', () => {
   })();
 });
 
-/* ---------------- 换一种分法：AI 分类（本片只搭壳） ----------------
+/* ---------------- AI 设置（接口地址 / 密钥 / 模型名） ----------------
+ * 界面只负责「读出来摆上去、把用户改的存回去、点一下测连接」，真正的读写与请求都在核心那几个模块里。
+ * **密钥不回显**：输入框是密码型，读设置时留空（留空 = 不改动已保存的那份）。
+ */
+function setAiConfigStatus(msg: string): void {
+  el.aiConfigStatus.textContent = msg;
+}
+
+/** 把设置摆到界面上（密钥只显示「已保存几位」，内容不回显）。 */
+function renderAiConfig(view: AiSeedConfigView | null): void {
+  if (!view) return;
+  el.aiEndpoint.value = view.endpoint;
+  el.aiModel.value = view.model;
+  el.aiKey.value = ''; // 绝不回显密钥本体
+  el.aiKey.placeholder = view.hasKey
+    ? `已保存 ${view.keyLength} 位，留空就不改动它`
+    : '还没填密钥（必填）';
+  el.aiConfigPath.textContent = `配置文件：${view.configPath}`;
+  setAiConfigStatus(view.hasKey ? '已配置' : '还没配置');
+}
+
+/** 启动时把上次保存的设置读回来摆上。 */
+async function loadAiConfigToForm(): Promise<void> {
+  try {
+    const view = (await api.aiConfigLoad()) as AiSeedConfigView | null;
+    if (view) renderAiConfig(view);
+    else setAiConfigStatus('没读到 AI 设置');
+  } catch (err) {
+    setAiConfigStatus(`读 AI 设置失败：${(err as Error)?.message ?? '未知错误'}`);
+  }
+}
+
+listen(el.aiSave, 'click', () => {
+  void (async () => {
+    setAiConfigStatus('正在保存…');
+    let saved: { ok?: boolean; message?: string; config?: AiSeedConfigView } | null = null;
+    try {
+      saved = await api.aiConfigSave({
+        endpoint: String(el.aiEndpoint.value ?? ''),
+        model: String(el.aiModel.value ?? ''),
+        authToken: String(el.aiKey.value ?? ''),
+      });
+    } catch (err) {
+      setAiConfigStatus(`保存失败：${(err as Error)?.message ?? '未知错误'}`);
+      return;
+    }
+    if (saved?.config) renderAiConfig(saved.config);
+    setAiConfigStatus(saved?.message ?? (saved?.ok === false ? '保存失败' : '已保存'));
+    notice(saved?.ok === false ? 'AI 设置没保存成功' : 'AI 设置已保存（下次打开自动读回）');
+    await refreshAiStatus();
+  })();
+});
+
+listen(el.aiTest, 'click', () => {
+  void (async () => {
+    setAiConfigStatus('正在测试连接…');
+    let result: { ok?: boolean; message?: string } | null = null;
+    try {
+      result = await api.aiConfigTest({
+        endpoint: String(el.aiEndpoint.value ?? ''),
+        model: String(el.aiModel.value ?? ''),
+        authToken: String(el.aiKey.value ?? ''),
+      });
+    } catch (err) {
+      setAiConfigStatus(`测试连接失败：${(err as Error)?.message ?? '未知错误'}`);
+      return;
+    }
+    setAiConfigStatus(result?.message ?? '测试连接没有结果');
+  })();
+});
+
+/* ---------------- AI 建议：先看、能改（改规则）、确认采用 ----------------
+ * 硬要求：**AI 只给建议**；采用之后就把建议变成「既有规则表里的规则」（条件 = 文件名在建议清单里），
+ * 再走**既有的**预览 / 开始整理那条管线落盘 —— 界面绝不自己复制、也不自己建分类夹。
+ * 「建议 → 规则」的换算与「每个文件落到哪」的求值都在核心那一处（同一个求值函数），界面只摆出来。
+ */
+
+/** 这一次的 AI 建议（人确认之前只存在内存里；不确认什么都不改）。 */
+let pendingAiSuggestions: AiSeedAssignment[] = [];
+
+function renderAiSuggestions(): void {
+  el.aiSuggest.textContent = '';
+  if (pendingAiSuggestions.length === 0) return;
+  const byCategory = new Map<string, string[]>();
+  for (const a of pendingAiSuggestions) {
+    const list = byCategory.get(a.category) ?? [];
+    list.push(a.source.split(/[\\/]/).pop() ?? a.source);
+    byCategory.set(a.category, list);
+  }
+
+  const head = document.createElement('div');
+  head.className = 'ai-suggest-head';
+  head.textContent = `AI 建议（${pendingAiSuggestions.length} 个文件，分 ${byCategory.size} 类）—— 还没采用，采用之前不会动任何文件：`;
+  el.aiSuggest.appendChild(head);
+
+  for (const [category, names] of byCategory) {
+    const line = document.createElement('div');
+    line.className = 'item ai-suggest-item';
+    line.textContent = `${category}（${names.length}）：${names.slice(0, 8).join('、')}${names.length > 8 ? ' …' : ''}`;
+    el.aiSuggest.appendChild(line);
+  }
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  const accept = makeButton('采用这些建议（变成规则）', 'ai-accept', () => {
+    void acceptAiSuggestions();
+  });
+  const drop = makeButton('不采用（丢掉建议）', 'ai-drop', () => {
+    pendingAiSuggestions = [];
+    renderAiSuggestions();
+    el.aiNotice.textContent = '已丢掉这次 AI 建议：规则没变，也没动任何文件。';
+  });
+  row.appendChild(accept);
+  row.appendChild(drop);
+  el.aiSuggest.appendChild(row);
+}
+
+/** 采用建议：换算成规则 → 摆进规则表 → 提醒用户点「预览」看一遍再「开始整理」。 */
+async function acceptAiSuggestions(): Promise<void> {
+  if (pendingAiSuggestions.length === 0) return;
+  let outcome: AiSeedRuleOutcome | null = null;
+  try {
+    outcome = await api.aiSuggestRules(pendingAiSuggestions, rulesForUse(), `ai-${Date.now().toString(36)}`);
+  } catch (err) {
+    el.aiNotice.textContent = `建议没能变成规则：${(err as Error)?.message ?? '未知错误'}（什么都没改）`;
+    return;
+  }
+  if (!outcome || !Array.isArray(outcome.rules) || outcome.rules.length === 0) {
+    el.aiNotice.textContent = '建议没能变成规则（没拿到可用的规则表），什么都没改';
+    return;
+  }
+  // 走既有的规则表：从这一刻起，预览与「开始整理」用的就是这套（含 AI 建议那条）
+  setRules(outcome.rules, true);
+  pendingAiSuggestions = [];
+  renderAiSuggestions();
+  const checks = outcome.checks ?? [];
+  const mismatched = checks.filter((c) => {
+    const want = checks.find((x) => x.source === c.source);
+    return !want;
+  }).length;
+  setRuleStatus(`已采用 AI 建议：${outcome.rules.length} 条规则（放在最前面优先命中）—— 记得点「保存规则」`);
+  el.aiNotice.textContent =
+    `已把 AI 建议变成规则（共 ${outcome.rules.length} 条，放在规则表最前面）。` +
+    `每个文件按这套规则算出来的分类和 AI 建议一致（核对了 ${checks.length} 个）${mismatched > 0 ? '（有对不上的，请看一眼规则表）' : ''}。` +
+    `下一步：点「预览」看一遍 → 再点「开始整理」（还是只复制、不动原文件）。`;
+  invalidatePreview();
+}
+
+/** 进度：AI 分类一批一批发出去时，界面上看得到走到哪儿了（老桩里没这个方法时静默跳过）。 */
+api.onAiProgress?.((p: AiSeedProgress) => {
+  if (!p || typeof p.done !== 'number') return;
+  el.aiNotice.textContent = `AI 正在分批分类：已发 ${p.done} / 共 ${p.total} 个文件…`;
+});
+
+/* ---------------- 换一种分法：AI 分类（先撤销、后 AI 的硬顺序照旧） ----------------
  * 用户要的那条路：整轮整理完觉得分得不好 → 先把这次复制出去的撤销掉 → 再换一种分法重来。
  * **顺序是硬要求**：① 撤销接口被调到 → ② 撤销成功之后才去调 AI 分类接口。
  *   - 撤销没成功（有文件删不掉）→ 如实显示撤销报告，**不往下调 AI**（不在没撤干净的状态上再叠一层）；
@@ -1394,7 +1562,6 @@ async function refreshAiStatus(): Promise<void> {
   el.aiStatus.textContent = 'AI 分类：未配置';
   el.aiStatus.className = 'hint';
 }
-
 /** 把「撤销报告」画一遍（撤销失败时也要如实显示 —— 这正是它存在的意义）。 */
 function renderUndoOutcomeReport(view: UndoOutcomeView | null): void {
   const result = view?.result;
@@ -1456,16 +1623,29 @@ el.aiReclassify.addEventListener('click', () => {
       return;
     }
 
-    // ③ 撤销成功之后，才去问 AI 分类（本片恒「还没配置」，如实转告）
-    let ai: { ok?: boolean; message?: string; reason?: string } | null = null;
+    // ③ 撤销成功之后，才去问 AI 分类（真调用：分批发请求、失败一律明确失败并回落规则分类）
+    let ai: AiSeedClassifyOutcome | null = null;
     try {
-      ai = (await api.aiClassify(collectFiles(), outputDir)) as { ok?: boolean; message?: string; reason?: string };
+      ai = (await api.aiClassify(collectFiles(), outputDir)) as AiSeedClassifyOutcome;
     } catch (err) {
-      el.aiNotice.textContent = `本次已撤销（删掉 ${result.deletedFiles ?? 0} 个文件）。AI 分类没能调起来：${(err as Error)?.message ?? '未知错误'}`;
+      el.aiNotice.textContent = `本次已撤销（删掉 ${result.deletedFiles ?? 0} 个文件）。AI 分类没能调起来：${(err as Error)?.message ?? '未知错误'}（按规则分类照旧可用）`;
+      pendingAiSuggestions = [];
+      renderAiSuggestions();
       return;
     }
     const aiMessage = ai && typeof ai.message === 'string' && ai.message.length > 0 ? ai.message : 'AI 分类没有结果。';
-    el.aiNotice.textContent = `本次已撤销（删掉 ${result.deletedFiles ?? 0} 个文件）。${aiMessage}`;
+    // 失败（没配置 / 连不上 / 超时 / 回的看不懂）：说清原因 + 明确回落规则分类，一个文件都不动
+    if (ai?.ok !== true) {
+      pendingAiSuggestions = [];
+      renderAiSuggestions();
+      el.aiNotice.textContent = `本次已撤销（删掉 ${result.deletedFiles ?? 0} 个文件）。${aiMessage}——这次没有采用任何 AI 建议，也没有复制或删除任何文件；先按规则分类整理即可。`;
+      await refreshAiStatus();
+      return;
+    }
+    // 成功：先把建议摆出来给人看（**还没采用**），确认之后才变成规则、再走既有管线落盘
+    pendingAiSuggestions = Array.isArray(ai.assignments) ? ai.assignments.slice() : [];
+    renderAiSuggestions();
+    el.aiNotice.textContent = `本次已撤销（删掉 ${result.deletedFiles ?? 0} 个文件）。${aiMessage}——下面是 AI 建议（还没采用，采用之前不会动任何文件）。`;
     await refreshAiStatus();
   })();
 });
@@ -1477,7 +1657,9 @@ void initRules();
 // 启动时顺手报一次「上一次整理」的状态：有可撤销的 → 按钮可点；没有 / 已撤过 → 按钮不可点 + 说清原因。
 // 记录在主进程 userData 下（持久化），所以关掉程序再打开，上一次整理仍然可撤。
 void refreshUndo();
-// 启动时顺手把「AI 分类：未配置」那行状态显出来：不用点按钮就知道现在只有规则分类可用。
+// 启动时顺手把「AI 分类：未配置 / 已配置」那行状态显出来：不用点按钮就知道现在能不能用 AI 分法。
 void refreshAiStatus();
+// 启动时把上次保存的 AI 设置读回来摆上（密钥不回显，只显示「已保存 N 位」）
+void loadAiConfigToForm();
 // 方向校验：界面刚起来时名单是空的，先算一遍（结论就是「还没有可整理的文件」）
 refreshDirectionNow();
