@@ -1,23 +1,39 @@
 /**
  * 纯逻辑：递归展开拖进来的文件夹 + 算每个文件的目标路径。**不依赖 Electron**。
  *
- * 本片的语义是**文件夹优先**（用户拍板的）：
+ * ============================================================================================
+ * 统一规则（用户 2026-10 定稿）—— 本文件是这套行为的权威实现，下面四条为准
+ * ============================================================================================
+ * 1. **批量处理文件（不是文件夹）**：每个文件各自按「规则」分类；输出根下直接出分类夹。
+ *    → 本文件里对应 `flat`（不传 roots）那条路：`buildPreviewTree` / `copyFiles` 保持原行为。
+ * 2. **单个文件夹（本身没有子文件夹）**：在这个文件夹里，把它的文件按同一套规则分类。
+ *    → 对应「顶层那一层的文件走 `sinkOne()`：同名可沉就沉、没得沉就按规则建分类夹」。
+ * 3. **嵌套多层文件夹**：先 DFS 遍历整棵树、记录所有文件的索引；再重构文件夹结构 ——
+ *    保留原有「里面有文件」的那部分层级（空文件夹、只剩空壳的分支不重建），
+ *    在每一层为「这一层的散文件」按规则加上分类夹，然后按记录把文件复制进去。
+ *    **同一套规矩对每一层都适用**（含「文件名与同层子文件夹同名就沉进去」这条）。
+ *    → 对应 `scanNodeAt()`（DFS 记录）+ `processNode()`（逐层重建）+ `pruneEmptyBranches()`（只留有文件的层级）。
+ * 4. **预览里把重建后的完整文件树展示出来**。
+ *    → 对应 `preview.ts` 的 `PreviewTree.roots`（每一份 → 原样保留的子树 + 这一层新建的分类夹）。
  *
- *   1. **子文件夹里的文件按原样保留相对路径**：`下载\照片\风景\a.jpg` → `<输出根>\下载\照片\风景\a.jpg`
- *      —— 一路原样搬过去，**不再按规则重分**；源文件夹的层级结构原样保留。
- *   2. **只有散在「某个源文件夹自己那层根下」的文件才按规则分类**：
- *      `下载\散1.jpg` → `<输出根>\下载\<规则算出的分类夹>\散1.jpg`。
- *   3. **绝不混在一起**（用户硬要求）：来自不同源文件夹的文件永远不会出现在同一个输出目录里。
- *      新语义下这条天然成立且更强：整棵源文件夹树是按原路径搬的，只有各层根下的散文件进分类夹，
- *      而那些分类夹也各自待在**自己那一层**下面。
- *   4. **同名不相撞**：同一段输出路径里同名的文件夹要加序号（`备份`、`备份 (2)`）；
- *      不同父目录下的同名子文件夹各待在各的父层下面，本来就不撞。
+ * --------------------------------------------------------------------------------------------
+ * 本片此前几轮的细节口径（都属于上面 1~3 的展开，不改变四条本身）
+ * --------------------------------------------------------------------------------------------
+ *   · **子文件夹里的文件按原样保留相对路径**：`下载\照片\风景\a.jpg` → `<输出根>\下载\照片\风景\a.jpg`；
+ *   · **某一层根下的散文件「往下沉到底」**：那一层若有和它同名的子文件夹（文件自己的名字去扩展名、
+ *     大小写不敏感、只比同一层）就沉进去，进去后按同一规矩继续看，直到没有同名的可沉 → 停在那一层；
+ *     一次都没沉成才按规则新建分类夹；沉到底那层已有同名文件 → 按「原名 (1).后缀」换名、绝不覆盖；
+ *     出发那层被同名**文件**占着 → 不动它、退回规则并说明；下沉只在同一棵源文件夹树内；
+ *   · **绝不混在一起**（用户硬要求）：来自不同源文件夹的文件永远不会出现在同一个输出目录里；
+ *   · **同名不相撞**：同一段输出路径里同名的文件夹加序号（`备份`、`备份 (2)`）。
  *
  * 结构示意（输出根下）：
  *   下载\                     ← 拖入的源文件夹，输出根下同名一份
  *     01_图片\                ← 「下载」根下散文件（散1.jpg）的分类夹
- *     散3.xlsx                ← 「下载」根下的散文件，规则算出来是 05_其他，所以直接在这层……
- *     照片\                   ← 「下载」的子文件夹：原样保留
+ *     一路沉\                 ← 「下载」根下 一路沉.jpg 与它同名 → 沉进去
+ *       一路沉\               ← 里面还有同名的 → 继续沉
+ *         一路沉.jpg
+ *     照片\                   ← 「下载」的子文件夹：原样保留（空文件夹/空壳分支不重建）
  *       图1.png
  *       婚纱\
  *         纱1.jpg
@@ -26,7 +42,7 @@
  *       图2.png
  *
  * 铁律：
- *  - 递归只收**文件**；空文件夹不产生输出；
+ *  - 递归只收**文件**；空文件夹不产生输出（只剩空壳的分支也不重建）；
  *  - 读不了的子文件夹 → 跳过并记一行原因（`skipped`），绝不让整次展开失败；
  *  - 不跟随符号链接 / 快捷方式（一律跳过并记原因），避免绕圈；
  *  - 深度超过 `MAX_SCAN_DEPTH`（20）层就停下并说明原因；
@@ -567,6 +583,18 @@ export function buildPlan(options: PlanOptions): PlanResult {
   };
 
   /**
+   * ③ 「只保留有文件的那部分层级」：子树里一个文件都没有的分支（空文件夹、只剩空壳的分支）
+   *    **不重建** —— 从计划里去掉，免得预演出一个磁盘上根本不会建的目录
+   *    （磁盘那边只为「真的有文件落进去」的目录建夹，两边由此保持一致）。
+   * 注意：必须在**所有文件都放好之后**才修剪 —— 否则会把散文件待会儿要沉进去的那个子文件夹先删掉。
+   */
+  const pruneEmptyBranches = (folder: PlannedFolder): void => {
+    folder.subfolders = folder.subfolders.filter((sub) => sub.totalFileCount > 0);
+    for (const sub of folder.subfolders) pruneEmptyBranches(sub);
+    folder.totalFileCount = countFilesOf(folder);
+  };
+
+  /**
    * 把一个「某一层根下的文件」按规矩放下去：**同名就往下沉，沉到底**。
    *
    * 停下来的三种情形：
@@ -599,6 +627,8 @@ export function buildPlan(options: PlanOptions): PlanResult {
     const steps: SinkStep[] = [];
     let curNode: ScanNode = node;
     let curOut = outputDirPath;
+    /** 下沉经过的每一层计划节点（第 0 个就是起点那一层），用来在下沉后刷新各层文件数 */
+    const chainPlans: PlannedFolder[] = [top];
     let guard = 0;
 
     /** 在计划树里按输出名找这一层对应的那一份（用于登记并进来的文件）。 */
@@ -632,8 +662,16 @@ export function buildPlan(options: PlanOptions): PlanResult {
         break; // 已经到深度上限，停在这里并在下面说明
       }
       const plannedHit = plannedAt(chain);
+      if (process.env.DSH_DEBUG_SINK) {
+        console.log(
+          `[dbg-hit] file=${file.name} chain=${JSON.stringify(chain)} hit=${!!plannedHit} topKids=${JSON.stringify(
+            top.subfolders.map((s) => `${s.outputName}:${s.totalFileCount}:${s.keptFiles.length}:${s.mergedInto.length}`),
+          )}`,
+        );
+      }
       if (!plannedHit) break;
       steps.push({ name: plannedHit.outputName });
+      chainPlans.push(plannedHit);
       curNode = hit;
       curOut = plannedHit.outputDir;
     }
@@ -787,6 +825,12 @@ export function buildPlan(options: PlanOptions): PlanResult {
     owner.keptFileCount++;
     top.looseFileCount++;
     top.mergedCount++;
+    // 重要：往下沉到子层之后，那条链上每一层的文件数都要跟着刷新 ——
+    // 否则「空壳分支」的修剪会把刚刚收下文件的这一层误当成空分支删掉（磁盘那边其实是对的）。
+    for (let i = chainPlans.length - 1; i >= 0; i--) {
+      chainPlans[i].totalFileCount = countFilesOf(chainPlans[i]);
+    }
+    void owner;
   };
 
   const roots: PlannedRoot[] = [];
@@ -795,7 +839,7 @@ export function buildPlan(options: PlanOptions): PlanResult {
     if (countScanFiles(node) === 0) continue;
     const picked = pickUniqueFolderName(node.origin.rootName, '\u0000<输出根>', usedByScope);
     const rootOutputDir = targetDirOf(outputDir, [picked.name]);
-    // 顶层源文件夹：这一层根下的散文件按规则分类（新语义的第一条路）
+    // 顶层源文件夹：这一层根下的散文件按规则分类/下沉
     const subtree = processNode(node, picked.name, rootOutputDir, true, picked.renamed);
     roots.push({
       origin: node.origin,
@@ -806,6 +850,11 @@ export function buildPlan(options: PlanOptions): PlanResult {
       totalFileCount: subtree.totalFileCount,
     });
   }
+
+  // ③ 所有文件都放好之后，再把「一个文件都没有」的分支（空文件夹、只剩空壳的分支）修剪掉：
+  //    这些分支**不重建**，免得预演出磁盘上根本不会建的目录。
+  for (const root of roots) pruneEmptyBranches(root.subtree);
+  for (const root of roots) root.totalFileCount = root.subtree.totalFileCount;
 
   return { outputDir, roots, files, skipped: scan.skipped };
 }

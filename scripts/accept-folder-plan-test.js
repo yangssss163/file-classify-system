@@ -366,6 +366,60 @@ async function main() {
       console.log(`      逐棵源树检查过：${byTree.size} 棵树，各自的目标都留在自己树下`);
     });
 
+    /* ---------- 五之六、只保留「里面有文件」的那部分层级（空壳分支不重建） ---------- */
+    await check('空壳分支不重建：一个文件都没有的分支不出现在预览/计划里（与磁盘一致）', async () => {
+      // 造一棵带空壳的树：空文件夹、只装着空文件夹的分支，另有散文件沉进同名子文件夹
+      const husk = path.join(tmpRoot, '空壳用例');
+      fs.mkdirSync(path.join(husk, '空文件夹'), { recursive: true });
+      fs.mkdirSync(path.join(husk, '空壳分支', '再一层空的'), { recursive: true });
+      fs.mkdirSync(path.join(husk, '照片'), { recursive: true });
+      fs.writeFileSync(path.join(husk, '照片.jpg'), 'h1', 'utf8');
+      fs.writeFileSync(path.join(husk, '散1.jpg'), 'h2', 'utf8');
+
+      const huskOut = path.join(tmpRoot, '空壳输出');
+      const huskPlan = core.planFolders({ roots: [husk], outputDir: huskOut, rules: null });
+      eq(huskPlan.plan.roots.length, 1, '空壳用例应该只有一份顶层落点');
+      const subtree = huskPlan.plan.roots[0].subtree;
+      // 计划里只该留下「收下了散文件的 照片」这一层
+      eq(
+        subtree.subfolders.map((s) => s.outputName).join(','),
+        '照片',
+        '计划里留下的子文件夹（空文件夹 / 空壳分支都不该出现）',
+      );
+      eq(subtree.subfolders[0].totalFileCount, 1, '照片 这一层应当收下 1 个文件');
+      // 预览里同样不该出现空壳
+      const huskPreview = core.buildPreviewTree({ files: [], roots: [husk], outputDir: huskOut, rules: null });
+      ok(huskPreview.ok === true, '空壳用例的预览应当成功');
+      const names = JSON.stringify(huskPreview.tree.roots[0].self.subfolders.map((s) => s.name));
+      eq(names, JSON.stringify(['照片']), '预览里留下的子文件夹');
+      // 真落盘：磁盘上也不该出现那两个空壳目录
+      const huskScan = core.expandFolders([husk]);
+      const huskSummary = await core.copyFiles({
+        outputDir: huskOut,
+        files: huskScan.files.map((f) => f.fullPath),
+        roots: [husk],
+      });
+      eq(huskSummary.failureCount, 0, '空壳用例复制不该失败');
+      const onDisk = [];
+      const walk = (dir) => {
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) {
+            onDisk.push(path.relative(huskOut, full).split(path.sep).join('\\'));
+            walk(full);
+          }
+        }
+      };
+      walk(huskOut);
+      ok(!onDisk.some((d) => d.includes('空文件夹')), `磁盘上重建了空文件夹：${onDisk.join(' | ')}`);
+      ok(!onDisk.some((d) => d.includes('空壳分支')), `磁盘上重建了空壳分支：${onDisk.join(' | ')}`);
+      ok(
+        onDisk.some((d) => d.endsWith('照片')),
+        `磁盘上应当有 照片 这一层：${onDisk.join(' | ')}`,
+      );
+      console.log(`      计划与磁盘都只留下有文件的层级：${onDisk.join(' | ')}`);
+    });
+
     /* ---------- 六、同名匹配大小写不敏感 + 只比同一层 ---------- */
     await check('同名匹配大小写不敏感（Windows 语义），且只跟同一层的子文件夹比、不跨层', () => {
       const photos = byName('photos.jpg');
