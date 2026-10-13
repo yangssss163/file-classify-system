@@ -10,6 +10,7 @@ import { baseName, extensionOf } from './classify';
 import { activeFolderNamesOf, type RuleTable } from './rules';
 import { classifyWithMeta } from './classifyWithMeta';
 import { describeError } from './copyFiles';
+import { planFolders, type PlanResult, type SkippedPath } from './expandAndPlan';
 
 /** 某个文件读不到元信息时的说明；能读到就是 null。 */
 export interface PreviewFileError {
@@ -45,6 +46,49 @@ export interface PreviewFolder {
   files: PreviewFile[];
 }
 
+/**
+ * 预览里「某个源文件夹自己那一份」：源文件夹各归各，一眼看出哪一份是哪个源路径来的。
+ * （分组显示用，绝不落盘。）
+ */
+export interface PreviewSourceFolder {
+  /** 源文件夹名（子文件夹就是它自己那一层的名字） */
+  name: string;
+  /** 源文件夹完整路径（说清「这一份是哪来的」） */
+  sourcePath: string;
+  /** 相对顶层的各层子文件夹名；顶层就是 [] */
+  chain: string[];
+  /** 顶层源文件夹路径 */
+  rootPath: string;
+  /** 顶层源文件夹名 */
+  rootName: string;
+  /** 输出里的这一份相对输出根的路径（如 ['下载','照片']）；同名源文件夹会被改成「照片 (2)」 */
+  outputChain: string[];
+  /** 这一份的输出目录（显示用，预览绝不创建它） */
+  outputDir: string;
+  /** 这一份的文件个数（只算它自己根下的文件） */
+  count: number;
+  /** 是不是因为「另一个同名源文件夹」改过名 */
+  renamed: boolean;
+  /** 这一份下面的分类夹（名字 + 文件明细） */
+  folders: PreviewFolder[];
+}
+
+/** 预览树里的一个顶层源文件夹：它自己 + 它下面的每一层子文件夹各一份。 */
+export interface PreviewRoot {
+  /** 顶层源文件夹名 */
+  name: string;
+  /** 顶层源文件夹路径 */
+  path: string;
+  /** 输出里的顶层名字（同名不覆盖时可能被改成「备份 (2)」） */
+  outputName: string;
+  /** 这一份自己（相对输出根就是 [输出名]） */
+  self: PreviewSourceFolder;
+  /** 它下面各层子文件夹的份数（按发现顺序；源文件夹各归各） */
+  children: PreviewSourceFolder[];
+  /** 这个顶层源文件夹一共展开出几个文件（含子文件夹里的） */
+  total: number;
+}
+
 /** 一棵分类预览树：每个分类一行（名字 + 数量），展开是文件名。 */
 export interface PreviewTree {
   /** 输入的文件总数 */
@@ -63,6 +107,16 @@ export interface PreviewTree {
   outputDir: string | null;
   /** 本次预览用的是不是调用方传进来的规则表（不是就是默认规则） */
   rulesApplied: boolean;
+  /** 有没有按「源文件夹各归各」分组（拖入了文件夹时才是 true） */
+  tracked: boolean;
+  /** 拖进来的顶层源文件夹个数（= 界面上的「来自 M 个文件夹」）；没有分组时为 0 */
+  rootCount: number;
+  /** 展开出来的所有源文件夹份数（顶层 + 各层子文件夹） */
+  sourceFolderCount: number;
+  /** 按源文件夹分好的组（分组显示用）；没有分组时为空数组 */
+  roots: PreviewRoot[];
+  /** 被跳过的路径与原因（读不了的子文件夹、符号链接、太深的目录…）；一个都没有时为空数组 */
+  skipped: SkippedPath[];
 }
 
 /** 没选输出文件夹 / 没拖入任何文件时的提示（人话，不抛错）。 */
@@ -78,8 +132,14 @@ export interface PreviewValidationError {
 export type PreviewOutcome = { ok: true; tree: PreviewTree } | PreviewValidationError;
 
 export interface PreviewBuildOptions {
-  /** 要预览的文件路径列表 */
+  /** 要预览的文件路径列表（拖入的文件；不是文件夹时用这个） */
   files: readonly string[];
+  /**
+   * 拖入/选中的**源文件夹**路径列表。传了它就走「源文件夹各归各」：
+   * 每个源文件夹（含各层子文件夹）在输出里各有一份，绝不互相混；
+   * 这时 `files` 会被忽略（文件由递归展开得到）。
+   */
+  roots?: readonly string[] | null;
   /** 输出文件夹；只用于显示，预览绝不创建或写入它 */
   outputDir?: string | null;
   /** 分类规则表；不传就用默认规则（按后缀分五类）。与实际整理必须是同一套。 */
@@ -89,6 +149,34 @@ export interface PreviewBuildOptions {
    * 置为 false 时所有文件都按「可读」记，用于不碰磁盘的纯计算场合。
    */
   checkReadable?: boolean;
+}
+
+/** 「这一次预览/整理要按源文件夹各归各处理」的那批顶层源文件夹（由界面在调用前放好）。 */
+let sourceRootsForNextRun: string[] = [];
+
+/**
+ * 放下「这一次预览要按源文件夹各归各处理」的那批顶层源文件夹。
+ *
+ * 为什么单独一个入口、不并进 `preview()` 的参数：
+ * 界面侧那条预览调用 `api.preview(selectedFiles.slice(), outputDir, rulesForUse())` 被第 7 条验收
+ * 用字面量钉着（不许改它一个字），所以源文件夹只能另开一条路送进来。
+ * 放**空**就等于「这次按普通散文件处理」（与不传同义），只读地用一次就清掉，不残留给下一次。
+ */
+export function setSourceRoots(roots: readonly string[] | null | undefined): void {
+  sourceRootsForNextRun = Array.from(roots ?? [])
+    .map((r) => String(r))
+    .filter((r) => r.length > 0);
+}
+
+/** 看一眼当前放好的源文件夹（只给测试/排查用，不参与判定）。 */
+export function currentSourceRoots(): string[] {
+  return sourceRootsForNextRun.slice();
+}
+
+function takeSourceRoots(): string[] {
+  const out = sourceRootsForNextRun;
+  sourceRootsForNextRun = [];
+  return out;
 }
 
 /** 只读探测一个文件的元信息：给不出人话原因就算「读不到」，但绝不让整棵树失败。 */
@@ -109,20 +197,31 @@ function probeFile(filePath: string, checkReadable: boolean): { readable: boolea
 }
 
 /**
- * 纯函数（除只读 stat 外无副作用）：输入文件路径列表，输出一棵分类预览树。
+ * 纯函数（除只读 stat / readdir 外无副作用）：输入文件或源文件夹，输出一棵分类预览树。
  *
  * 保证：
  *  - 每个文件的 `folder` 来自现有分类规则，和真正执行复制时一致；
  *  - 预览树的分类顺序、文件夹名与执行时一致；
+ *  - 传了 `roots`（拖入文件夹）时：按**源文件夹各归各**分组，每一份的目标路径与
+ *    「开始整理」时用的是同一个 `planFolders()`（同一个求值入口 + 同一套换名规则）；
  *  - **不创建任何目录、不写任何文件**（包括输出文件夹本身）；
  *  - 单个文件读不到元信息只标注原因，不影响整棵树。
  */
 export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
+  // 源文件夹两个来源：显式传的 `roots`，或调用方事先用 `setSourceRoots()` 放好的那一批。
+  // 两者都只读地用一次，之后清掉，绝不会把上一次的源文件夹留到下一次。
+  const preset = takeSourceRoots();
+  const roots = Array.from(options?.roots ?? [])
+    .map((r) => String(r))
+    .filter((r) => r.length > 0);
+  if (roots.length === 0) for (const r of preset) roots.push(r);
   const files = Array.from(options?.files ?? []);
-  if (files.length === 0) {
-    return { ok: false, reason: 'no-files', message: '还没有可预览的文件，先拖进来或点「选择文件」' };
-  }
   const outputDir = options?.outputDir ?? null;
+  const tracked = roots.length > 0;
+
+  if (!tracked && files.length === 0) {
+    return { ok: false, reason: 'no-files', message: '还没有可预览的文件，先拖进来或点「选择文件」「选择文件夹」' };
+  }
   if (outputDir === null || outputDir === undefined || String(outputDir).trim() === '') {
     return { ok: false, reason: 'no-output-dir', message: '还没选输出文件夹，先点「选择输出文件夹」' };
   }
@@ -134,25 +233,50 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
   const byFolder = new Map<string, PreviewFile[]>();
   for (const folder of activeFolderNamesOf(rules)) byFolder.set(folder, []);
 
-  for (const raw of files) {
-    const p = String(raw);
-    const matched = classifyWithMeta(rules, p);
-    const probe = probeFile(p, checkReadable);
-    const item: PreviewFile = {
-      path: p,
-      name: baseName(p),
-      ext: extensionOf(p),
-      folder: matched.folder,
+  let plan: PlanResult | null = null;
+  let skipped: SkippedPath[] = [];
+
+  if (tracked) {
+    // 展开 + 算目标路径：与「开始整理」走同一个 planFolders（只读，绝不建目录）
+    const outcome = planFolders({ roots, outputDir: String(outputDir), rules, checkExisting: checkReadable });
+    plan = outcome.plan;
+    skipped = plan.skipped.slice();
+    for (const s of outcome.takenReadErrors) skipped.push(s);
+  }
+
+  const pushInto = (folder: string, item: PreviewFile): void => {
+    entries.push(item);
+    let bucket = byFolder.get(folder);
+    if (!bucket) {
+      bucket = [];
+      byFolder.set(folder, bucket);
+    }
+    bucket.push(item);
+  };
+
+  /** 文件 → 预览条目（分类一律来自规则求值，与执行时同一个函数）。 */
+  const previewItemOf = (filePath: string, folder: string): PreviewFile => {
+    const probe = probeFile(filePath, checkReadable);
+    return {
+      path: filePath,
+      name: baseName(filePath),
+      ext: extensionOf(filePath),
+      folder,
       readable: probe.readable,
       error: probe.error,
     };
-    entries.push(item);
-    let bucket = byFolder.get(item.folder);
-    if (!bucket) {
-      bucket = [];
-      byFolder.set(item.folder, bucket);
+  };
+
+  if (tracked && plan) {
+    for (const f of plan.files) {
+      pushInto(f.folder, previewItemOf(f.fullPath, f.folder));
     }
-    bucket.push(item);
+  } else {
+    for (const raw of files) {
+      const p = String(raw);
+      const matched = classifyWithMeta(rules, p);
+      pushInto(matched.folder, previewItemOf(p, matched.folder));
+    }
   }
 
   const folders: PreviewFolder[] = [];
@@ -160,6 +284,80 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
   for (const [folder, list] of byFolder) {
     folders.push({ folder, count: list.length, files: list });
     counts[folder] = list.length;
+  }
+
+  // 按源文件夹分组（每一份各归各）：一份一个分类夹列表，绝不合到一起
+  const rootsOut: PreviewRoot[] = [];
+  let sourceFolderCount = 0;
+  if (tracked && plan) {
+    const makeSourceFolder = (planned: PlanResult['folders'][number]): PreviewSourceFolder => {
+      const origin = planned.origin;
+      return {
+        name: origin.chain.length > 0 ? origin.chain[origin.chain.length - 1] : origin.rootName,
+        sourcePath: origin.chain.length > 0 ? [origin.rootPath, ...origin.chain].join('\\') : origin.rootPath,
+        chain: origin.chain.slice(),
+        rootPath: origin.rootPath,
+        rootName: origin.rootName,
+        outputChain: planned.outputChain.slice(),
+        outputDir: planned.outputDir,
+        count: 0,
+        renamed: planned.renamed,
+        folders: [],
+      };
+    };
+    const sourceFolderByKey = new Map<string, PreviewSourceFolder>();
+    const ensureRoot = (rootPath: string, rootName: string): PreviewRoot => {
+      const found = rootsOut.find((r) => r.path.toLowerCase() === rootPath.toLowerCase());
+      if (found) return found;
+      const created: PreviewRoot = {
+        name: rootName,
+        path: rootPath,
+        outputName: rootName,
+        self: makeSourceFolder({
+          origin: { rootPath, rootName, chain: [], key: rootPath },
+          outputChain: [rootName],
+          outputDir: '',
+          fileCount: 0,
+          renamed: false,
+        }),
+        children: [],
+        total: 0,
+      };
+      rootsOut.push(created);
+      return created;
+    };
+
+    for (const planned of plan.folders) {
+      const sf = makeSourceFolder(planned);
+      sourceFolderByKey.set(planned.origin.key, sf);
+      sourceFolderCount++;
+      const rootEntry = ensureRoot(planned.origin.rootPath, planned.origin.rootName);
+      if (planned.origin.chain.length === 0) {
+        rootEntry.self = sf;
+        if (planned.outputChain.length > 0) rootEntry.outputName = planned.outputChain[planned.outputChain.length - 1];
+      } else {
+        rootEntry.children.push(sf);
+      }
+    }
+
+    // 每一份下面的分类夹（空分类不列，免得每一份都拖一堆空行）
+    for (const f of plan.files) {
+      const sf = sourceFolderByKey.get(f.plannedFolder.origin.key);
+      if (!sf) continue;
+      let bucket = sf.folders.find((g) => g.folder === f.folder);
+      if (!bucket) {
+        bucket = { folder: f.folder, count: 0, files: [] };
+        sf.folders.push(bucket);
+      }
+      bucket.files.push(previewItemOf(f.fullPath, f.folder));
+      bucket.count = bucket.files.length;
+      sf.count++;
+    }
+
+    // 顶层源文件夹的「一共几个文件」= 它自己 + 它下面各层
+    for (const rootEntry of rootsOut) {
+      rootEntry.total = rootEntry.self.count + rootEntry.children.reduce((sum, c) => sum + c.count, 0);
+    }
   }
 
   return {
@@ -173,6 +371,11 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
       unreadableCount: entries.filter((f) => !f.readable).length,
       outputDir: String(outputDir),
       rulesApplied: rules !== null && rules !== undefined,
+      tracked,
+      rootCount: rootsOut.length,
+      sourceFolderCount,
+      roots: rootsOut,
+      skipped,
     },
   };
 }

@@ -212,6 +212,9 @@ function makeLocalOrganizer(withRules) {
     pickOutputDir: async () => null,
     exists: async () => ({}),
     preview: async () => ({ ok: true, tree: { total: 0, folders: [], counts: {}, files: [], readableCount: 0, unreadableCount: 0, outputDir: null, rulesApplied: true } }),
+    // 界面点预览前会先把「这次要按源文件夹各归各处理」的那批源文件夹放下来（第 09 片加的），
+    // 这里给个什么都不做的桩，免得这条旧断言因为缺这个方法而提前返回。
+    setSourceRoots: async () => true,
     organize: async () => ({ total: 0, successCount: 0, failureCount: 0, results: [], outputDir: '' }),
     openPath: async () => '',
     loadRules: async () => ({ ok: true, rules: defaultsFive(), source: 'default', message: 'stub 默认规则', filePath: 'stub' }),

@@ -8,3 +8,4 @@ export * from './classifyWithMeta';
 export * from './plan';
 export * from './copyFiles';
 export * from './preview';
+export * from './expandAndPlan';

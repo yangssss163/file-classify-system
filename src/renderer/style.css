@@ -39,6 +39,25 @@ button.primary { font-weight: 600; }
 .preview-tree .file-error { color: #dc2626; }
 .preview-tree .empty { color: #7b8794; }
 
+/* 预览：按源文件夹分组（只求一眼看清「谁和谁不混」） */
+.preview-tree .root { border: 1px solid #dbe3ee; border-radius: 6px; padding: 4px 8px; margin: 6px 0; }
+.preview-tree .root-head, .preview-tree .source-head, .preview-tree .cat-head { cursor: pointer; }
+.preview-tree .root-head { font-weight: 700; color: #1f2933; }
+.preview-tree .source-head { font-weight: 600; }
+.preview-tree .root-files { margin-left: 10px; }
+.preview-tree .source { border-left: 2px solid #dbe3ee; padding-left: 8px; margin: 3px 0; }
+.preview-tree .source-files { margin-left: 12px; }
+.preview-tree .source-out { color: #2563eb; font-size: 12px; }
+.preview-tree .cat { margin: 2px 0; }
+.preview-tree .cat-head { font-weight: 600; color: #52606d; }
+.preview-tree .cat .files { margin-left: 14px; }
+.preview-tree .fold-label { cursor: pointer; }
+
+/* 被跳过的文件夹/路径（含原因）：不许藏在暗处 */
+.skipped { max-height: 140px; overflow: auto; }
+.skipped-head { color: #b45309; font-weight: 600; }
+.skipped-item { color: #92400e; font-size: 12px; padding: 1px 0; }
+
 /* 规则编辑器：只求看得清每行有哪几种条件 */
 .rule-list { border: 1px solid #e4e8ee; border-radius: 6px; padding: 6px 10px; }
 .rule-list .rule-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 4px 0; border-bottom: 1px dashed #eef1f5; }

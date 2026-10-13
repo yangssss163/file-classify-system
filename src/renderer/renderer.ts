@@ -7,8 +7,11 @@ import type {
   OrganizeProgress,
   OrganizerApi,
   PreviewOutcome,
+  PreviewSourceFolder,
   PreviewTree,
   Rule,
+  ScanResult,
+  SkippedPath,
 } from './api-types';
 
 declare global {
@@ -79,14 +82,17 @@ function listen(target: unknown, type: string, handler: (ev: unknown) => void): 
 const el = {
   drop: getEl<HTMLDivElement>('drop'),
   pickFiles: getEl<HTMLButtonElement>('pick-files'),
+  pickFolders: getEl<HTMLButtonElement>('pick-folders'),
   clearFiles: getEl<HTMLButtonElement>('clear-files'),
   fileCount: getEl<HTMLSpanElement>('file-count'),
+  skipped: getEl<HTMLDivElement>('skipped'),
   pickOut: getEl<HTMLButtonElement>('pick-out'),
   outDir: getEl<HTMLSpanElement>('out-dir'),
   preview: getEl<HTMLButtonElement>('preview'),
   previewWarning: getEl<HTMLParagraphElement>('preview-warning'),
   previewSummary: getEl<HTMLParagraphElement>('preview-summary'),
   previewTree: getEl<HTMLDivElement>('preview-tree'),
+  previewSkipped: getEl<HTMLDivElement>('preview-skipped'),
   start: getEl<HTMLButtonElement>('start'),
   progress: getEl<HTMLSpanElement>('progress'),
   openOut: getEl<HTMLButtonElement>('open-out'),
@@ -109,7 +115,14 @@ const el = {
  */
 const PREVIEW_WARNING = '以下是预览，还没有复制任何文件：原文件、输出文件夹都保持原样。';
 
+/** 界面状态：单选的文件名单 + 拖入/选中的源文件夹名单（两者分开记，各归各）。 */
 let selectedFiles: string[] = [];
+/** 拖入/选中的源文件夹（顶层）。有它就走「源文件夹各归各」。 */
+let selectedRoots: string[] = [];
+/** 源文件夹递归展开的结果（只读、不落盘）；没有文件夹时是 null。 */
+let scanResult: ScanResult | null = null;
+/** 展开/挑选时被跳过的路径与原因（给用户看，不隐藏）。 */
+let skippedPaths: SkippedPath[] = [];
 let outputDir: string | null = null;
 let running = false;
 
@@ -117,8 +130,68 @@ function notice(msg: string): void {
   el.notice.textContent = msg;
 }
 
+/**
+ * 当前要整理的文件清单 = 单选的文件 + 从源文件夹递归展开出来的文件。
+ * 两者都是「文件」，都要能预览、能整理；但源文件夹那批必须带着归属一起走，
+ * 所以这里只合成一份**扁平清单**（顺序稳定：先单选的，后展开的），
+ * 真正决定落到哪里的仍然是 `selectedRoots`（后端按归属算路径）。
+ */
+function collectFiles(): string[] {
+  const out = selectedFiles.slice();
+  const seen = new Set(out.map((f) => f.toLowerCase()));
+  for (const f of scanResult?.files ?? []) {
+    const key = String(f?.fullPath ?? '').toLowerCase();
+    if (key.length === 0 || seen.has(key)) continue;
+    seen.add(key);
+    out.push(f.fullPath);
+  }
+  return out;
+}
+
+/**
+ * 把展开出来的文件并进主名单。
+ * 为什么要并进来：预览/整理用的都是同一份扁平名单（`selectedFiles`），
+ * 而「源文件夹」是**额外**的第四个参数（后端据此算每一份的归属路径）。
+ * 展开完就并一次，后面「已选 N 个文件（来自 M 个文件夹）」与预览/整理都只看这一份。
+ */
+function mergeScannedIntoSelected(): void {
+  selectedFiles = collectFiles();
+}
+
 function refreshCounts(): void {
-  el.fileCount.textContent = `已选 ${selectedFiles.length} 个文件`;
+  const total = collectFiles().length;
+  el.fileCount.textContent =
+    selectedRoots.length > 0
+      ? `已选 ${total} 个文件（来自 ${selectedRoots.length} 个文件夹）`
+      : `已选 ${total} 个文件`;
+  renderSkipped();
+}
+
+/** 被跳过的文件夹/路径：一条一行（源文件夹里读不了的子文件夹必须能看见原因）。 */
+function renderSkipped(): void {
+  el.skipped.textContent = '';
+  if (skippedPaths.length === 0) return;
+  const head = document.createElement('div');
+  head.className = 'skipped-head';
+  head.textContent = `已跳过 ${skippedPaths.length} 处（不影响其它文件继续整理）：`;
+  el.skipped.appendChild(head);
+  for (const s of skippedPaths) {
+    const line = document.createElement('div');
+    line.className = 'skipped-item';
+    line.textContent = `${s.fullPath} —— ${s.reason}`;
+    el.skipped.appendChild(line);
+  }
+}
+
+/** 把展开结果里跳过的原因收进来（同一路径只记一次）。 */
+function mergeSkipped(list: readonly SkippedPath[]): void {
+  const seen = new Set(skippedPaths.map((s) => `${s.fullPath}|${s.reason}`));
+  for (const s of list ?? []) {
+    const key = `${s.fullPath}|${s.reason}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    skippedPaths.push(s);
+  }
 }
 
 function renderOutDir(): void {
@@ -152,6 +225,13 @@ function mergeFiles(incoming: string[]): { added: string[]; duplicates: number }
   return { added, duplicates };
 }
 
+/* ---------------- 名单：文件 + 源文件夹（两样分开记） ---------------- */
+
+/**
+ * 收下一批路径。先问主进程「哪些是文件、哪些是文件夹」：
+ *  - 文件 → 进单文件名单（照旧直接落在 输出根\分类夹\）；
+ *  - 文件夹 → 递归展开成文件集合，每个文件带着它的源文件夹归属（「源文件夹各归各」）。
+ */
 async function acceptPaths(
   paths: string[],
   sourceLabel: string,
@@ -166,25 +246,82 @@ async function acceptPaths(
   }
 
   const files: string[] = [];
-  let folders = 0;
+  const folders: string[] = [];
   const missing: string[] = [];
   for (const p of paths) {
     if (isFileMap[p] === true) files.push(p);
-    else if (isFileMap[p] === false) folders++;
+    else if (isFileMap[p] === false) folders.push(p);
     else missing.push(p);
   }
 
   const { added, duplicates } = mergeFiles(files);
+  let folderNote = '';
+  if (folders.length > 0) {
+    const scanned = await expandRoots(folders);
+    folderNote = scanned;
+    // 展开出来的文件并进主名单：预览/整理用的就是这一份（源文件夹另走第 4 个参数）
+    mergeScannedIntoSelected();
+  }
   refreshCounts();
-  if (added.length > 0) invalidatePreview();
+  if (added.length > 0 || folders.length > 0) invalidatePreview();
 
   const msgs: string[] = [];
   if (added.length > 0) msgs.push(`${sourceLabel}加入 ${added.length} 个文件`);
-  if (folders > 0) msgs.push(`暂不支持文件夹，已忽略 ${folders} 个文件夹`);
+  if (folderNote) msgs.push(folderNote);
   if (missing.length > 0) msgs.push(`${missing.length} 个路径已失效，已忽略`);
   if (duplicates > 0) msgs.push(`${duplicates} 个重复文件已跳过`);
   if (extraHint) msgs.push(extraHint);
   notice(msgs.length > 0 ? msgs.join('；') : '没有可用的文件');
+}
+
+/**
+ * 把拖入/选中的文件夹递归展开（只读）并并进名单。
+ * 展开由主进程做（界面拿不到 node）；拿到的每个文件都带着源文件夹归属。
+ * @returns 给人看的一句说明（如「来自 2 个文件夹，共 5 个文件」）
+ */
+async function expandRoots(roots: string[]): Promise<string> {
+  let result: ScanResult | null = null;
+  try {
+    result = await api.expand(roots);
+  } catch (err) {
+    notice(`展开文件夹失败：${(err as Error)?.message ?? '未知错误'}`);
+    return '';
+  }
+  if (!result || !Array.isArray(result.files)) return '';
+
+  // 源文件夹名单：合并（同一个文件夹反复拖入只算一个）
+  const seenRoot = new Set(selectedRoots.map((r) => r.toLowerCase()));
+  let newRoots = 0;
+  for (const r of roots) {
+    const key = String(r).toLowerCase();
+    if (seenRoot.has(key)) continue;
+    seenRoot.add(key);
+    selectedRoots.push(String(r));
+    newRoots++;
+  }
+
+  if (!scanResult) scanResult = { files: [], folders: [], skipped: [] };
+  const seenFile = new Set(scanResult.files.map((f) => f.fullPath.toLowerCase()));
+  let newFiles = 0;
+  for (const f of result.files ?? []) {
+    const key = String(f?.fullPath ?? '').toLowerCase();
+    if (key.length === 0 || seenFile.has(key)) continue;
+    seenFile.add(key);
+    scanResult.files.push(f);
+    newFiles++;
+  }
+  const seenFolder = new Set(scanResult.folders.map((f) => f.key));
+  for (const f of result.folders ?? []) {
+    if (seenFolder.has(f.key)) continue;
+    seenFolder.add(f.key);
+    scanResult.folders.push(f);
+  }
+  mergeSkipped(result.skipped ?? []);
+
+  if (newFiles === 0) {
+    return `${roots.length} 个文件夹里没有找到文件${newRoots > 0 ? '（文件夹本身已记下）' : ''}`;
+  }
+  return `加入 ${newFiles} 个文件（来自 ${newRoots > 0 ? newRoots : roots.length} 个文件夹）`;
 }
 
 /* ---------------- 预览（纯内存，绝不写盘） ---------------- */
@@ -199,11 +336,104 @@ function fileLine(f: PreviewTree['files'][number]): HTMLDivElement {
 }
 
 /**
- * 画预览树：每个分类一行（分类名 + 文件数），点一下展开看具体文件名。
- * 只往内存里的 DOM 写，不碰磁盘。
+ * 一个「可展开的块」：一行标题（几行几列的数字）+ 一段内容。
+ * 标题前面那个三角点一下就展开/收起，纯 DOM 操作，不碰磁盘。
+ */
+function collapsible(
+  headText: string,
+  countText: string,
+  bodyClass: string,
+  openByDefault: boolean,
+  className: string,
+): { box: HTMLDivElement; body: HTMLDivElement; head: HTMLDivElement; text: HTMLSpanElement } {
+  const box = document.createElement('div');
+  box.className = className;
+
+  const head = document.createElement('div');
+  head.className = `${className}-head`;
+  const text = document.createElement('span');
+  text.className = 'fold-label';
+  text.textContent = `${openByDefault ? '▾' : '▸'} ${headText}　`;
+  head.appendChild(text);
+  if (countText.length > 0) {
+    const count = document.createElement('span');
+    count.className = 'folder-count';
+    count.textContent = countText;
+    head.appendChild(count);
+  }
+
+  const body = document.createElement('div');
+  body.className = bodyClass;
+  body.style.display = openByDefault ? 'block' : 'none';
+
+  const toggle = (): void => {
+    const open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : 'block';
+    text.textContent = `${open ? '▸' : '▾'} ${headText}　`;
+  };
+  listen(head, 'click', toggle);
+  listen(text, 'click', toggle);
+
+  box.appendChild(head);
+  box.appendChild(body);
+  return { box, body, head, text };
+}
+
+/** 一份源文件夹下面的一个分类夹（如 01_图片 —— 2 个文件）。 */
+function categoryBlock(group: { folder: string; count: number; files: PreviewTree['files'] }): HTMLDivElement {
+  const { box, body } = collapsible(`${group.folder}`, `${group.count} 个文件`, 'files', true, 'cat');
+  for (const f of group.files) body.appendChild(fileLine(f));
+  return box;
+}
+
+/**
+ * 画「某个源文件夹自己那一份」的一行：源路径 + 输出落到哪 + 几个文件；
+ * 展开是它下面的分类夹（各归各，绝不与别的源文件夹合在一起）。
+ */
+function sourceFolderBlock(sf: PreviewSourceFolder, depth: number): HTMLDivElement {
+  const outPath = sf.outputChain.join('\\');
+  const label = `${sf.name}${sf.renamed ? '（同名，已改成别的输出名）' : ''}（源：${sf.sourcePath}）`;
+  const { box, body } = collapsible(label, `${sf.count} 个文件`, 'source-files', depth === 0, 'source');
+  const outLine = document.createElement('div');
+  outLine.className = 'source-out';
+  outLine.textContent = `→ 输出到：${outPath}\\<分类夹>\\`;
+  body.appendChild(outLine);
+  if (sf.count === 0) {
+    const none = document.createElement('div');
+    none.className = 'empty';
+    none.textContent = '（这一份没有直接躺在它根下的文件）';
+    body.appendChild(none);
+  }
+  for (const g of sf.folders) body.appendChild(categoryBlock(g));
+  return box;
+}
+
+/**
+ * 画预览树。
+ *  - 拖入了文件夹（tree.tracked）：**按源文件夹分组**，每个源文件夹一份，
+ *    下面列出它自己的分类夹（一眼看出「谁和谁不混」），并写清输出落到哪；
+ *  - 只是一堆散文件：照旧按分类列出。
+ * 全程只往内存里的 DOM 写，不碰磁盘。
  */
 function renderPreviewTree(tree: PreviewTree): void {
   el.previewTree.textContent = '';
+
+  if (tree.tracked && Array.isArray(tree.roots) && tree.roots.length > 0) {
+    for (const root of tree.roots) {
+      const { box, body } = collapsible(
+        `${root.name}（源：${root.path}）`,
+        `共 ${root.total} 个文件`,
+        'root-files',
+        true,
+        'root',
+      );
+      body.appendChild(sourceFolderBlock(root.self, 0));
+      for (const child of root.children) body.appendChild(sourceFolderBlock(child, 1));
+      el.previewTree.appendChild(box);
+    }
+    return;
+  }
+
   for (const group of tree.folders) {
     const box = document.createElement('div');
     box.className = group.files.length > 0 ? 'folder' : 'folder hidden';
@@ -252,18 +482,36 @@ function renderPreviewTree(tree: PreviewTree): void {
   }
 }
 
+/** 预览里也把「跳过了哪几处、为什么」写出来（不藏在暗处）。 */
+function renderPreviewSkipped(tree: PreviewTree): void {
+  el.previewSkipped.textContent = '';
+  const list = tree.skipped ?? [];
+  if (list.length === 0) return;
+  const head = document.createElement('div');
+  head.className = 'skipped-head';
+  head.textContent = `预览时跳过 ${list.length} 处（不影响其它文件）：`;
+  el.previewSkipped.appendChild(head);
+  for (const s of list) {
+    const line = document.createElement('div');
+    line.className = 'skipped-item';
+    line.textContent = `${s.fullPath} —— ${s.reason}`;
+    el.previewSkipped.appendChild(line);
+  }
+}
+
 /** 清掉上一次预览，避免「旧预览」被误当成当前名单的结果。 */
 function clearPreview(): void {
   el.previewWarning.textContent = '';
   el.previewSummary.textContent = '';
   el.previewTree.textContent = '';
+  el.previewSkipped.textContent = '';
 }
 
 el.preview.addEventListener('click', () => {
   void (async () => {
     clearPreview();
     if (selectedFiles.length === 0) {
-      notice('还没有可预览的文件，先拖进来或点「选择文件」');
+      notice('还没有可预览的文件，先拖进来或点「选择文件」「选择文件夹」');
       return;
     }
     if (!outputDir) {
@@ -273,11 +521,20 @@ el.preview.addEventListener('click', () => {
 
     let outcome: PreviewOutcome;
     try {
+      // 本次预览要按「源文件夹各归各」分组：先把这批源文件夹放好，再点预览。
       // 规则表就传当前界面上这一套：预览说哪个文件进哪个分类，执行时用的是同一套。
+      api.setSourceRoots(selectedRoots.slice());
       outcome = await api.preview(selectedFiles.slice(), outputDir, rulesForUse());
     } catch (err) {
       notice(`预览没做出来：${(err as Error)?.message ?? '未知错误'}`);
       return;
+    } finally {
+      // 只给这一次用：用完就清掉，免得残留给下一次（界面换名单后不会用上次的源文件夹）
+      try {
+        api.setSourceRoots([]);
+      } catch {
+        /* 清不掉也不影响本次结果 */
+      }
     }
 
     if (!outcome || outcome.ok !== true) {
@@ -290,11 +547,14 @@ el.preview.addEventListener('click', () => {
     const notes: string[] = [];
     if (tree.rulesApplied === true) notes.push(rulesSummaryText());
     if (tree.unreadableCount > 0) notes.push(`其中 ${tree.unreadableCount} 个读不到文件信息，已标注原因`);
+    if (tree.tracked === true) notes.push(`来自 ${tree.rootCount} 个文件夹（共 ${tree.sourceFolderCount} 份，各归各，绝不互相混）`);
+    if (tree.skipped && tree.skipped.length > 0) notes.push(`跳过 ${tree.skipped.length} 处`);
     if (tree.outputDir) notes.push(`计划输出到：${tree.outputDir}`);
     el.previewSummary.textContent =
       `共 ${tree.total} 个文件，会分到 ${tree.folders.filter((g) => g.count > 0).length} 个分类文件夹` +
       (notes.length > 0 ? `（${notes.join('；')}）` : '');
     renderPreviewTree(tree);
+    renderPreviewSkipped(tree);
     notice('预览完成：这一步没有写任何文件');
   })();
 });
@@ -716,16 +976,18 @@ window.addEventListener('dragover', (ev) => ev.preventDefault());
 window.addEventListener('drop', (ev) => ev.preventDefault());
 
 /**
- * 把拖进来的文件交给名单。
+ * 把拖进来的文件/文件夹交给名单。
  * 路径只能由预加载脚本里的 webUtils.getPathForFile 取（File.path 在 Electron 32 起已被移除，44 上完全没有），
  * 所以这里一律调 api.pathForFile，且不许留「先试 File.path」的后路。
  * 取不到路径不许静默：必须给人一句人话提示。
+ * 拖进来的可能是文件夹（DataTransfer 里同样是 File 对象）：交给 acceptPaths 分派，
+ * 是文件夹就递归展开成文件集合，并把「每个文件属于哪个源文件夹」一路带下去。
  */
 function createDropHandler(): (ev: DragEvent) => void {
   return (ev: DragEvent): void => {
     const dt = ev.dataTransfer;
     if (!dt || dt.files.length === 0) {
-      notice('这次拖入没有拿到文件，请改用「选择文件」按钮');
+      notice('这次拖入没有拿到文件/文件夹，请改用「选择文件」「选择文件夹」按钮');
       return;
     }
 
@@ -738,13 +1000,12 @@ function createDropHandler(): (ev: DragEvent) => void {
     }
 
     if (paths.length === 0) {
-      notice('读不到这个文件的路径，请改用「选择文件」按钮');
+      notice('读不到这个文件/文件夹的路径，请改用「选择文件」「选择文件夹」按钮');
       return;
     }
 
-    // 文件夹在当前 Electron 版本下拿不到可用路径：忽略它，但不能让整次拖入失败。
-    // 数量对不上就说明有拿不到路径的（拖的是文件夹，或系统暂时给不出路径）。
-    const unreadableHint = unreadable > 0 ? `暂不支持文件夹，已忽略 ${unreadable} 个` : '';
+    // 数量对不上就说明有拿不到路径的（系统暂时给不出路径），如实说一句，不让整次拖入失败。
+    const unreadableHint = unreadable > 0 ? `${unreadable} 个拖入项没拿到路径，已忽略` : '';
     void acceptPaths(paths, '拖入', unreadableHint);
   };
 }
@@ -760,8 +1021,25 @@ el.pickFiles.addEventListener('click', () => {
   })();
 });
 
+// 「选择文件夹」：与拖入文件夹是同一个能力（拖拽不灵时必须能走通），可多选。
+listen(el.pickFolders, 'click', () => {
+  void (async () => {
+    let picked: string[] = [];
+    try {
+      picked = await api.pickFolders();
+    } catch (err) {
+      notice(`打开「选择文件夹」失败：${(err as Error)?.message ?? '未知错误'}`);
+      return;
+    }
+    await acceptPaths(picked, '选择文件夹：');
+  })();
+});
+
 listen(el.clearFiles, 'click', () => {
   selectedFiles = [];
+  selectedRoots = [];
+  scanResult = null;
+  skippedPaths = [];
   refreshCounts();
   invalidatePreview();
   el.list.textContent = '';
@@ -803,8 +1081,9 @@ api.onProgress((p: OrganizeProgress) => {
 el.start.addEventListener('click', () => {
   void (async () => {
     if (running) return;
-    if (selectedFiles.length === 0) {
-      notice('还没有可整理的文件，先拖进来或点「选择文件」');
+    const files = collectFiles();
+    if (files.length === 0) {
+      notice('还没有可整理的文件，先拖进来或点「选择文件」「选择文件夹」');
       return;
     }
     if (!outputDir) {
@@ -812,20 +1091,40 @@ el.start.addEventListener('click', () => {
       return;
     }
 
-    const files = selectedFiles.slice();
+    const roots = selectedRoots.slice();
     const out = outputDir;
     const rules = rulesForUse();
     running = true;
     el.start.disabled = true;
     el.list.textContent = '';
     el.progress.textContent = `已处理 0 / 共 ${files.length}`;
-    notice('正在整理（只复制，不动原文件）…');
+    notice(
+      roots.length > 0
+        ? `正在整理（只复制，不动原文件）：${roots.length} 个源文件夹各归各，绝不互相混…`
+        : '正在整理（只复制，不动原文件）…',
+    );
 
     try {
-      // 与预览同一套规则：预览说哪个文件进哪个分类，这里就必须一致。
-      const summary = await api.organize(files, out, rules);
+      // 与预览同一套规则、同一套源文件夹：预览说哪个文件进哪个分类夹，这里就必须一致。
+      // 源文件夹走的是那条老路（第 4 个参数），与 `setSourceRoots` 放下的那批同义。
+      const summary = await api.organize(files, out, rules, roots.length > 0 ? roots : null);
       el.progress.textContent = `已处理 ${summary.total} / 共 ${summary.total}`;
-      el.summary.textContent = `整理完成：成功 ${summary.successCount} 个，失败 ${summary.failureCount} 个`;
+      const parts = [`整理完成：成功 ${summary.successCount} 个，失败 ${summary.failureCount} 个`];
+      if (summary.plannedFolders && summary.plannedFolders.length > 0) {
+        const renamed = summary.plannedFolders.filter((f) => f.renamed).length;
+        parts.push(`${roots.length} 个源文件夹各归各（共 ${summary.plannedFolders.length} 份${renamed > 0 ? `，其中 ${renamed} 份因同名改过输出名` : ''}）`);
+      }
+      if (summary.skipped && summary.skipped.length > 0) parts.push(`跳过 ${summary.skipped.length} 处`);
+      el.summary.textContent = parts.join('；');
+      // 同名源文件夹被改名时，一条条写清「哪个源路径 → 输出里叫什么」
+      for (const p of summary.plannedFolders ?? []) {
+        if (!p.renamed) continue;
+        addToList(`[改名] ${p.sourcePath} → 输出里的 ${p.outputChain.join('\\')}`, 'ok');
+      }
+      for (const s of summary.skipped ?? []) {
+        addToList(`[跳过] ${s.fullPath} —— ${s.reason}`, 'fail');
+      }
+      mergeSkipped((summary.skipped ?? []).map((s) => ({ fullPath: s.fullPath, reason: s.reason, name: s.name, originKey: '' })));
       notice(`输出目录：${summary.outputDir}`);
     } catch (err) {
       notice(`整理中断：${(err as Error)?.message ?? '未知错误'}`);

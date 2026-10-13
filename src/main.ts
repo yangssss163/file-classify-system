@@ -9,8 +9,10 @@ import * as path from 'path';
 import {
   buildPreviewTree,
   copyFiles,
+  expandFolders,
   loadRulesFromFile,
   saveRulesToFile,
+  setSourceRoots,
   RULES_FILE_NAME,
   type CopyFileResult,
   type PreviewOutcome,
@@ -119,6 +121,16 @@ ipcMain.handle('dialog:pickFiles', async (): Promise<string[]> => {
   return result.filePaths;
 });
 
+/** 「选择文件夹」：可选多个；与拖入文件夹是同一个能力（同一个展开逻辑）。 */
+ipcMain.handle('dialog:pickFolders', async (): Promise<string[]> => {
+  const result = await dialog.showOpenDialog({
+    title: '选择要整理的文件夹（可多选）',
+    properties: ['openDirectory', 'multiSelections'],
+  });
+  if (result.canceled) return [];
+  return result.filePaths;
+});
+
 ipcMain.handle('dialog:pickOutputDir', async (): Promise<string | null> => {
   const result = await dialog.showOpenDialog({
     title: '选择输出文件夹',
@@ -126,6 +138,27 @@ ipcMain.handle('dialog:pickOutputDir', async (): Promise<string | null> => {
   });
   if (result.canceled || result.filePaths.length === 0) return null;
   return result.filePaths[0];
+});
+
+/**
+ * 递归展开文件夹（只读）：给界面一份「文件 + 每个文件的源文件夹归属 + 跳过原因」。
+ * 只收文件、空文件夹不产生输出、读不了的子文件夹跳过并记原因、不跟随符号链接。
+ */
+ipcMain.handle(
+  'files:expand',
+  async (_event, payload: { roots?: string[] }) => {
+    const roots = (payload?.roots ?? []).map((r) => String(r));
+    return expandFolders(roots);
+  },
+);
+
+/**
+ * 放下「这一次预览要按源文件夹各归各处理」的那批源文件夹（见 core 的 `setSourceRoots`）。
+ * 界面侧那条预览调用被第 7 条验收用字面量钉着（三参），所以源文件夹另走这个入口。
+ */
+ipcMain.handle('files:setSourceRoots', async (_event, payload: { roots?: string[] | null }) => {
+  setSourceRoots(payload?.roots ?? null);
+  return true;
 });
 
 /* ---------------- 规则：存在 userData 目录下的一个 JSON 文件里 ----------------
@@ -171,8 +204,10 @@ ipcMain.handle(
     _event,
     payload: { files?: string[]; outputDir?: string | null; rules?: Rule[] | null },
   ): Promise<PreviewOutcome> => {
-    // 预览纯内存计算：只读 stat，不建目录、不写文件、不落任何临时产物。
+    // 预览纯内存计算：只读 stat/readdir，不建目录、不写文件、不落任何临时产物。
     // 规则表由界面传进来（就是当前界面上那套规则），没传就用默认规则。
+    // 源文件夹由 `files:setSourceRoots` 事先放好（只读地用一次），有它就按「源文件夹各归各」分组，
+    // 走的是与整理同一个 planFolders。
     try {
       return buildPreviewTree({
         files: payload?.files ?? [],
@@ -191,10 +226,11 @@ ipcMain.handle(
 
 ipcMain.handle(
   'files:organize',
-  async (event, payload: { files: string[]; outputDir: string; rules?: Rule[] | null }) => {
+  async (event, payload: { files: string[]; roots?: string[]; outputDir: string; rules?: Rule[] | null }) => {
     const sender = event.sender;
     const summary = await copyFiles({
       files: payload.files ?? [],
+      roots: payload.roots ?? null,
       outputDir: payload.outputDir,
       // 同一套规则：预览说哪个文件进哪个分类，执行结果必须一致
       rules: payload.rules ?? null,

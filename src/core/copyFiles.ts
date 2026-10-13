@@ -11,6 +11,7 @@ import * as path from 'path';
 import { defaultRules, type RuleTable } from './rules';
 import { classifyWithMeta } from './classifyWithMeta';
 import { pickUniqueName, MAX_RENAME_ATTEMPTS } from './classify';
+import { planFolders, type PlanResult } from './expandAndPlan';
 
 export interface CopyFileResult {
   /** 原文件路径 */
@@ -26,6 +27,10 @@ export interface CopyFileResult {
   renamed: boolean;
   /** 失败原因（人话），成功时为 null */
   error: string | null;
+  /** 「源文件夹各归各」时：这个文件属于哪个源文件夹（顶层拖入点的绝对路径）；普通文件模式为 null */
+  sourceRoot: string | null;
+  /** 「源文件夹各归各」时：相对源文件夹的各层子文件夹名；普通文件模式为 null */
+  sourceChain: string[] | null;
 }
 
 export interface CopySummary {
@@ -35,6 +40,17 @@ export interface CopySummary {
   results: CopyFileResult[];
   /** 输出根目录（绝对路径） */
   outputDir: string;
+  /** 「源文件夹各归各」时：每个源文件夹在输出里的落点（普通文件模式为空数组） */
+  plannedFolders: Array<{
+    sourcePath: string;
+    sourceChain: string[];
+    outputChain: string[];
+    outputDir: string;
+    fileCount: number;
+    renamed: boolean;
+  }>;
+  /** 「源文件夹各归各」时：被跳过的路径与原因（空文件夹不算，它只是不产生输出） */
+  skipped: Array<{ path: string; reason: string; name?: string }>;
 }
 
 export interface CopyOptions {
@@ -42,6 +58,15 @@ export interface CopyOptions {
   outputDir: string;
   /** 要复制的原文件路径列表 */
   files: readonly string[];
+  /**
+   * 源文件夹列表（拖入/选中的文件夹）。
+   * 传了它就走「源文件夹各归各」：每个源文件夹在输出根下有自己的同名夹，
+   * 各层的分类夹分别建，**来自不同源文件夹的文件绝不进同一个分类夹**。
+   * 不传则保持原行为（所有文件直接落到 输出根\分类夹\）。
+   */
+  roots?: readonly string[] | null;
+  /** 拖入的源文件夹路径本身（只用于「跳过原因」里说清是哪个根）；不传就用 roots */
+  rootOrigins?: readonly string[] | null;
   /**
    * 分类规则表；不传就用默认规则（按后缀分五类）。
    * **预览与执行必须传同一套规则**，否则会出现「预览说去 A、执行却去了 B」。
@@ -97,16 +122,39 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
   const rules = options.rules ?? defaultRules();
   const results: CopyFileResult[] = [];
 
-  // 预建五个分类文件夹 + 读一次已存在的名字（同名冲突判定用）
-  const takenByFolder = new Map<string, Set<string>>();
-  const ensureTaken = async (folder: string): Promise<Set<string>> => {
-    let set = takenByFolder.get(folder);
+  // 目标目录 → 已占用的名字（小写）。有 roots 时目标目录是「源文件夹落点 + 分类夹」，没有就是「输出根 + 分类夹」。
+  const takenByDir = new Map<string, Set<string>>();
+  const ensureTaken = async (dirKey: string, dir: string): Promise<Set<string>> => {
+    let set = takenByDir.get(dirKey);
     if (!set) {
-      set = await listTakenNames(path.join(outputDir, folder));
-      takenByFolder.set(folder, set);
+      set = await listTakenNames(dir);
+      takenByDir.set(dirKey, set);
     }
     return set;
   };
+
+  const dirKeyOf = (dir: string): string => `${dir.toLowerCase()}\\`;
+
+  /**
+   * 先把目标路径全算好（预览与执行共用同一个 `buildPlan`），再动手复制。
+   * 有 roots 时：先按源文件夹分组树算（每个源文件夹一份），再补上没归到任何源文件夹的文件（照旧按分类夹落）。
+   */
+  const planned = new Map<string, { dir: string; name: string; folder: string; root: string | null; chain: string[] | null; renamed: boolean }>();
+  let plan: PlanResult | null = null;
+  const roots = Array.from(options.roots ?? []).map((r) => String(r)).filter((r) => r.length > 0);
+  if (roots.length > 0) {
+    plan = planFolders({ roots, outputDir, rules }).plan;
+    for (const f of plan.files) {
+      planned.set(f.fullPath.toLowerCase(), {
+        dir: f.targetDir,
+        name: f.name,
+        folder: f.folder,
+        root: f.origin.rootPath,
+        chain: f.origin.chain.slice(),
+        renamed: f.renamed,
+      });
+    }
+  }
 
   await fs.mkdir(outputDir, { recursive: true });
 
@@ -117,8 +165,9 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
     done++;
 
     // 分类：与预览用同一个求值函数（大小/时间条件要真读属性，读不到就当作该项不命中）
+    const pre = planned.get(source.toLowerCase());
     const matched = classifyWithMeta(rules, source, originalName);
-    const folder = matched.folder;
+    const folder = pre ? pre.folder : matched.folder;
 
     const base: CopyFileResult = {
       source,
@@ -128,19 +177,24 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
       ok: false,
       renamed: false,
       error: null,
+      sourceRoot: pre ? pre.root : null,
+      sourceChain: pre ? pre.chain : null,
     };
 
     try {
-      const targetDir = path.join(outputDir, folder);
+      const targetDir = pre ? pre.dir : path.join(outputDir, folder);
       await fs.mkdir(targetDir, { recursive: true });
-      const taken = await ensureTaken(folder);
+      const dirKey = dirKeyOf(targetDir);
+      const taken = await ensureTaken(dirKey, targetDir);
 
       let finalName: string | null = null;
       let renamed = false;
       let lastError: unknown = null;
 
       for (let round = 0; round <= MAX_RENAME_ATTEMPTS; round++) {
-        const picked = pickUniqueName(originalName, taken);
+        // 有算好的目标名就用它（预览说叫这个名字，就得叫这个名字）；
+        // 名字已经被别人占了（比如算完之后有人插了文件）时，才退回现挑一个空位。
+        const picked = round === 0 && pre ? { name: pre.name, renamed: pre.renamed } : pickUniqueName(originalName, taken);
         if (picked.name === null) {
           lastError = new Error('同名文件太多，已试到 999 个，找不到空位');
           break;
@@ -196,5 +250,16 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
     failureCount: results.filter((r) => !r.ok).length,
     results,
     outputDir,
+    plannedFolders: plan
+      ? plan.folders.map((f) => ({
+          sourcePath: f.origin.chain.length > 0 ? path.join(f.origin.rootPath, ...f.origin.chain) : f.origin.rootPath,
+          sourceChain: f.origin.chain.slice(),
+          outputChain: f.outputChain.slice(),
+          outputDir: f.outputDir,
+          fileCount: f.fileCount,
+          renamed: f.renamed,
+        }))
+      : [],
+    skipped: plan ? plan.skipped.map((s) => ({ path: s.fullPath, reason: s.reason, name: s.name })) : [],
   };
 }

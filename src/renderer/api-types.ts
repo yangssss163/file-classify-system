@@ -45,6 +45,45 @@ export interface PreviewFolder {
   files: PreviewFile[];
 }
 
+/**
+ * 预览里「某个源文件夹自己那一份」。
+ * 源文件夹各归各：来自不同源文件夹的文件绝不会出现在同一份里。
+ */
+export interface PreviewSourceFolder {
+  /** 源文件夹名（子文件夹就是它自己那一层的名字） */
+  name: string;
+  /** 源文件夹完整路径（说清「这一份是哪来的」） */
+  sourcePath: string;
+  /** 相对顶层的各层子文件夹名；顶层就是 [] */
+  chain: string[];
+  /** 顶层源文件夹路径 */
+  rootPath: string;
+  /** 顶层源文件夹名 */
+  rootName: string;
+  /** 输出里的这一份相对输出根的路径（如 ['下载','照片']） */
+  outputChain: string[];
+  /** 这一份的输出目录（显示用，预览绝不创建它） */
+  outputDir: string;
+  /** 这一份自己的文件个数 */
+  count: number;
+  /** 是不是因为「另一个同名源文件夹」改过名（如「照片 (2)」） */
+  renamed: boolean;
+  /** 这一份下面的分类夹 */
+  folders: PreviewFolder[];
+}
+
+/** 预览树里的一个顶层源文件夹：它自己 + 它下面的每一层子文件夹各一份。 */
+export interface PreviewRoot {
+  name: string;
+  path: string;
+  /** 输出里的顶层名字（同名不覆盖时可能被改成「备份 (2)」） */
+  outputName: string;
+  self: PreviewSourceFolder;
+  children: PreviewSourceFolder[];
+  /** 这个顶层源文件夹一共展开出几个文件（含子文件夹里的） */
+  total: number;
+}
+
 /** 一棵分类预览树：每个分类一行（名字 + 数量），展开是文件名。 */
 export interface PreviewTree {
   total: number;
@@ -56,6 +95,38 @@ export interface PreviewTree {
   outputDir: string | null;
   /** 本次预览用的是不是界面上的规则表（不是就是默认规则） */
   rulesApplied: boolean;
+  /** 有没有按「源文件夹各归各」分组（拖入了文件夹时才是 true） */
+  tracked: boolean;
+  /** 拖进来的顶层源文件夹个数（界面上的「来自 M 个文件夹」） */
+  rootCount: number;
+  /** 展开出来的所有源文件夹份数（顶层 + 各层子文件夹） */
+  sourceFolderCount: number;
+  /** 按源文件夹分好的组 */
+  roots: PreviewRoot[];
+  /** 被跳过的路径与原因（读不了的子文件夹、符号链接、太深的目录…） */
+  skipped: { fullPath: string; reason: string; name?: string }[];
+}
+
+/** 被跳过的路径与原因（展开文件夹时）。 */
+export interface SkippedPath {
+  fullPath: string;
+  originKey: string;
+  name?: string;
+  reason: string;
+}
+
+/** 递归展开文件夹的结果（只读，不落盘）。 */
+export interface ScanResult {
+  /** 展开出来的文件（含源文件夹归属）；字段名叫 fullPath，避开 `.path` 的旧写法 */
+  files: {
+    fullPath: string;
+    name: string;
+    origin: { rootPath: string; rootName: string; chain: string[]; key: string };
+  }[];
+  /** 产生过文件的源文件夹（含各层子文件夹） */
+  folders: { rootPath: string; rootName: string; chain: string[]; key: string }[];
+  /** 被跳过的路径与原因 */
+  skipped: SkippedPath[];
 }
 
 /** 没选输出文件夹 / 没拖入任何文件时的提示（人话，不抛错）。 */
@@ -84,6 +155,23 @@ export interface CopySummary {
   }[];
   /** 输出根目录（绝对路径） */
   outputDir: string;
+  /** 「源文件夹各归各」时：每个源文件夹在输出里的落点（普通文件模式为空数组） */
+  plannedFolders: {
+    /** 源文件夹完整路径（说清这一份是哪来的） */
+    sourcePath: string;
+    /** 相对顶层的各层子文件夹名 */
+    sourceChain: string[];
+    /** 输出里的这一份相对输出根的各层名字 */
+    outputChain: string[];
+    /** 这一份的输出目录 */
+    outputDir: string;
+    /** 这一份的文件个数 */
+    fileCount: number;
+    /** 是不是因为「另一个同名源文件夹」改过名 */
+    renamed: boolean;
+  }[];
+  /** 被跳过的路径与原因（空文件夹不算，它只是不产生输出） */
+  skipped: { fullPath: string; reason: string; name?: string }[];
 }
 
 /** 整理过程中一次次回报的进度。 */
@@ -146,11 +234,18 @@ export interface OrganizerApi {
   /** 把拖进来的 File 换成磁盘路径（preload 里用 webUtils.getPathForFile）；取不到给 null */
   pathForFile(file: File): string | null;
   pickFiles(): Promise<string[]>;
+  /** 「选择文件夹」（可多选） */
+  pickFolders(): Promise<string[]>;
   pickOutputDir(): Promise<string | null>;
   exists(filePaths: string[]): Promise<Record<string, boolean>>;
+  /** 递归展开文件夹（只读）：文件 + 每个文件的源文件夹归属 + 跳过原因 */
+  expand(roots: string[]): Promise<ScanResult>;
+  /** 放下「这一次预览要按源文件夹各归各处理」的那批源文件夹（只读地用一次就清掉） */
+  setSourceRoots(roots: string[] | null): Promise<boolean>;
   /** 预览：只读计算，绝不写盘；规则表由界面传进去，跟当前界面上的规则保持一致 */
   preview(files: string[], outputDir: string | null, rules?: Rule[] | null): Promise<PreviewOutcome>;
-  organize(files: string[], outputDir: string, rules?: Rule[] | null): Promise<CopySummary>;
+  /** 整理：传了 roots 就走「源文件夹各归各」（每个源文件夹一份，绝不互相混） */
+  organize(files: string[], outputDir: string, rules?: Rule[] | null, roots?: string[] | null): Promise<CopySummary>;
   openPath(dir: string): Promise<string>;
   /** 读取上次保存的规则；读不到就是默认规则 */
   loadRules(): Promise<RulesLoadResult>;

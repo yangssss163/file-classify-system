@@ -10,15 +10,19 @@
   <p class="safety">原文件不会被删除，也不会被移动 —— 全程只做复制。</p>
 
   <div id="drop" class="drop">
-    把文件拖到这里<br />
-    <span class="hint">（支持一次拖入多个文件；文件夹暂不支持）</span>
+    把文件或<b>文件夹</b>拖到这里<br />
+    <span class="hint">（支持一次拖入多个；拖入的文件夹会整个展开，
+      每个源文件夹在输出里各占一份、各归各 —— 不同文件夹的文件绝不会混进同一个分类夹）</span>
   </div>
 
   <div class="row">
     <button id="pick-files">选择文件</button>
+    <button id="pick-folders">选择文件夹</button>
     <span id="file-count">已选 0 个文件</span>
     <button id="clear-files">清空名单</button>
   </div>
+  <p class="hint">「选择文件夹」可以多选；它和拖入文件夹是同一件事（拖拽不灵时走这里）。</p>
+  <div id="skipped" class="skipped"></div>
 
   <div class="row">
     <button id="pick-out">选择输出文件夹</button>
@@ -49,7 +53,10 @@
   <h2>预览</h2>
   <p id="preview-warning" class="preview-warning"></p>
   <p id="preview-summary" class="summary"></p>
+  <p class="hint">拖入文件夹时，下面<b>按源文件夹分组</b>：每个源文件夹（含它下面的每一层子文件夹）各占一份，
+    各归各，不同源文件夹的文件绝不会混进同一个分类夹。点一行可以展开/收起。</p>
   <div id="preview-tree" class="preview-tree"></div>
+  <div id="preview-skipped" class="skipped"></div>
 
   <h2>处理结果</h2>
   <div id="file-list" class="list"></div>

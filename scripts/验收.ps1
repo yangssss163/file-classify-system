@@ -2,7 +2,7 @@
 # 标准由控制台写死，工作台只执行，不修改、不放宽。
 # 跑法：npm run 验收   （= powershell -ExecutionPolicy Bypass -File scripts\验收.ps1）
 #
-# 七条断言（缺一不通过）：
+# 九条断言（缺一不通过）：
 #   1 纯逻辑测试      accept-logic-test.js    -> 分类逻辑OK
 #   2 真实复制测试    accept-copy-test.js     -> 复制落地OK
 #   3 真程序活着      真启动 electron.exe     -> 窗口活着OK（沙箱 shell 里会被 install_dir_access.cc 拦下，需非沙箱窗口跑）
@@ -11,6 +11,10 @@
 #     （拖入的文件必须真的进得来；含「探针有效性自检」与「界面产物真当脚本跑一遍」）
 #   6 规则引擎        accept-rules-test.js -> 规则引擎OK（不依赖界面，纯逻辑）
 #   7 规则编辑器      accept-rules-editor-test.js -> 规则编辑器OK（界面接线，不依赖真窗口）
+#   8 文件夹各归各    accept-folder-plan-test.js -> 文件夹各归各OK（纯逻辑，真造临时目录与文件；
+#     核心：来自不同源文件夹的文件永远不落进同一个分类夹）
+#   9 文件夹预览      accept-folder-preview-test.js -> 文件夹预览OK（界面接线，不依赖真窗口；
+#     拖入文件夹 → 界面按源文件夹分组画预览；含「探针有效性自检」）
 #
 # 编码约定：全链路 UTF-8。本脚本与 node 子进程之间按 UTF-8 走，日志也是 UTF-8，
 # 所以看日志别按 GBK 解（那是乱码）。判定逻辑只看退出码 + 日志里的 ASCII 标记，与编码无关。
@@ -43,7 +47,7 @@ function Fail([string]$why) {
 # ---------- 第 1 条：纯逻辑测试（不需要界面） ----------
 $logic = $false
 try {
-  Write-Step '--- 1/7 纯逻辑测试 ---'
+  Write-Step '--- 1/9 纯逻辑测试 ---'
   $outDir = Join-Path $projectRoot 'out'
   New-Item -ItemType Directory -Force -Path $outDir | Out-Null
   $logicTestJs = Join-Path $stage 'accept-logic-test.js'
@@ -64,7 +68,7 @@ try {
 # ---------- 第 2 条：真实复制测试（不需要界面） ----------
 $copy = $false
 try {
-  Write-Step '--- 2/7 真实复制测试 ---'
+  Write-Step '--- 2/9 真实复制测试 ---'
   $caseDir = Join-Path $stage "accept-copy-$stamp"
   $srcDir = Join-Path $caseDir 'src'
   $dstDir = Join-Path $caseDir 'dst'
@@ -101,7 +105,7 @@ try {
 $alive = $false
 $elProc = $null
 try {
-  Write-Step '--- 3/7 真程序活着 ---'
+  Write-Step '--- 3/9 真程序活着 ---'
   $buildLog = Join-Path $stage 'accept-build.log'
   $nodeExe = (Get-Command node).Source
   # 用 node 直接跑 npm-cli.js，避开 npm.cmd 的批处理壳子（壳子会把 stderr 当成本命令失败）
@@ -175,7 +179,7 @@ try {
 # ---------- 第 4 条：预览不落盘（不需要界面） ----------
 $preview = $false
 try {
-  Write-Step '--- 4/7 预览不落盘 ---'
+  Write-Step '--- 4/9 预览不落盘 ---'
   $previewCase = Join-Path $stage "accept-preview-$stamp"
   $previewSrc = Join-Path $previewCase 'src'
   $previewOut = Join-Path $previewCase 'out-empty'
@@ -211,7 +215,7 @@ try {
 # ---------- 第 5 条：拖入取路径（拖进来的文件必须真的进得来） ----------
 $dropPath = $false
 try {
-  Write-Step '--- 5/7 拖入取路径 ---'
+  Write-Step '--- 5/9 拖入取路径 ---'
   $dropTestJs = Join-Path $stage 'accept-drop-path-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-drop-path-test.js') -Destination $dropTestJs -Force
   $dropLog = Join-Path $stage 'accept-drop-path.log'
@@ -234,7 +238,7 @@ try {
 # ---------- 第 6 条：规则引擎（纯逻辑，不依赖界面） ----------
 $ruleEngine = $false
 try {
-  Write-Step '--- 6/7 规则引擎 ---'
+  Write-Step '--- 6/9 规则引擎 ---'
   $ruleTestJs = Join-Path $stage 'accept-rules-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-rules-test.js') -Destination $ruleTestJs -Force
   $ruleLog = Join-Path $stage 'accept-rules.log'
@@ -256,7 +260,7 @@ try {
 # ---------- 第 7 条：规则编辑器（界面接线，不依赖真窗口） ----------
 $ruleEditor = $false
 try {
-  Write-Step '--- 7/7 规则编辑器 ---'
+  Write-Step '--- 7/9 规则编辑器 ---'
   $editorTestJs = Join-Path $stage 'accept-rules-editor-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-rules-editor-test.js') -Destination $editorTestJs -Force
   $editorLog = Join-Path $stage 'accept-rules-editor.log'
@@ -275,7 +279,55 @@ try {
   Write-Host "规则编辑器测试异常：$($_.Exception.Message)"
 }
 
-if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor) {
+# ---------- 第 8 条：文件夹各归各（纯逻辑，真造临时目录与文件） ----------
+$folderPlan = $false
+try {
+  Write-Step '--- 8/9 文件夹各归各 ---'
+  $folderPlanTestJs = Join-Path $stage 'accept-folder-plan-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-folder-plan-test.js') -Destination $folderPlanTestJs -Force
+  $folderPlanLog = Join-Path $stage 'accept-folder-plan.log'
+  # 这条要在 npm run build 之后跑（第 3 条已经跑过 build），脚本会 require out\core\index.js
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node $folderPlanTestJs *> $folderPlanLog
+  $folderPlanCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $folderPlanLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "文件夹各归各测试退出码=$folderPlanCode  日志=$folderPlanLog"
+  if ($folderPlanCode -eq 0 -and ((Get-Content -LiteralPath $folderPlanLog -Encoding UTF8 -Raw) -match '文件夹各归各OK')) {
+    Write-Step '文件夹各归各OK'
+    $folderPlan = $true
+  }
+} catch {
+  Write-Host "文件夹各归各测试异常：$($_.Exception.Message)"
+}
+
+# ---------- 第 9 条：文件夹预览（界面接线，不依赖真窗口） ----------
+$folderPreview = $false
+try {
+  Write-Step '--- 9/9 文件夹预览 ---'
+  $folderPreviewTestJs = Join-Path $stage 'accept-folder-preview-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-folder-preview-test.js') -Destination $folderPreviewTestJs -Force
+  $folderPreviewLog = Join-Path $stage 'accept-folder-preview.log'
+  # 这条要在 npm run build 之后跑（第 3 条已经跑过 build），
+  # 脚本会读 out\renderer\renderer.js 并把界面产物在窗口式桩里真跑一遍。
+  # --experimental-vm-modules：要用真正的 ES module 作用域，没有它就直接判失败
+  $env:DSH_ACCEPT_STAGE = $stage
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node --experimental-vm-modules $folderPreviewTestJs *> $folderPreviewLog
+  $folderPreviewCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_STAGE -ErrorAction SilentlyContinue
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $folderPreviewLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "文件夹预览测试退出码=$folderPreviewCode  日志=$folderPreviewLog"
+  if ($folderPreviewCode -eq 0 -and ((Get-Content -LiteralPath $folderPreviewLog -Encoding UTF8 -Raw) -match '文件夹预览OK')) {
+    Write-Step '文件夹预览OK'
+    $folderPreview = $true
+  }
+} catch {
+  Write-Host "文件夹预览测试异常：$($_.Exception.Message)"
+}
+
+if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview) {
   Write-Step '验收通过'
   exit 0
 }
@@ -288,4 +340,6 @@ if (-not $preview) { $failedSteps += '预览不落盘' }
 if (-not $dropPath) { $failedSteps += '拖入取路径' }
 if (-not $ruleEngine) { $failedSteps += '规则引擎' }
 if (-not $ruleEditor) { $failedSteps += '规则编辑器' }
+if (-not $folderPlan) { $failedSteps += '文件夹各归各' }
+if (-not $folderPreview) { $failedSteps += '文件夹预览' }
 Fail ($failedSteps -join '+')
