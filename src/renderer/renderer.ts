@@ -387,7 +387,7 @@ function categoryBlock(group: { folder: string; count: number; files: PreviewTre
   return box;
 }
 
-/** 「原样保留」的那棵子树里的一个目录（层级照搬，不再分类）。 */
+/** 「原样保留」的那棵子树里的一个目录（含并进这个子文件夹的散文件）。 */
 function subFolderBlock(sub: PreviewSubFolder, depth: number): HTMLDivElement {
   const { box, body } = collapsible(
     `${sub.name}（原样保留）`,
@@ -401,21 +401,27 @@ function subFolderBlock(sub: PreviewSubFolder, depth: number): HTMLDivElement {
   outLine.textContent = `→ 原样保留到：${sub.outputPath}\\（不按规则重分）`;
   body.appendChild(outLine);
   for (const f of sub.files) body.appendChild(fileLine(f));
+  if (sub.mergedIn && sub.mergedIn.length > 0) {
+    const note = document.createElement('div');
+    note.className = 'source-note';
+    note.textContent = `其中 ${sub.mergedIn.length} 个是这次并进来的散文件：${sub.mergedIn.map((f) => f.name).join('、')}（这一层已有同名子文件夹，所以不另建分类夹）`;
+    body.appendChild(note);
+  }
   for (const child of sub.children) body.appendChild(subFolderBlock(child, depth + 1));
   return box;
 }
 
 /**
  * 画「某个源文件夹自己那一份」：源路径 + 输出落到哪 + 几个文件。
- * 展开后分两块（新语义：文件夹优先）：
- *  - 「本层散文件 → 分类夹」：只有直接躺在这一层根下的文件才按规则分类；
- *  - 「原样保留的子树」：子文件夹里的文件连层级一起搬，不再按规则重分。
+ * 展开后分两块（最终语义：散落的文件以子文件夹优先）：
+ *  - 「原样保留的子树」：子文件夹里的文件连层级一起搬；跟散文件同名的子文件夹会收下那些散文件；
+ *  - 「按规则新建的分类夹」：只有这一层没有同名子文件夹时才建。
  */
 function sourceFolderBlock(sf: PreviewSourceFolder, depth: number): HTMLDivElement {
   const label = `${sf.name}${sf.renamed ? '（同名，已改成别的输出名）' : ''}（源：${sf.sourcePath}）`;
   const { box, body } = collapsible(
     label,
-    `${sf.count} 个文件（散文件 ${sf.looseCount} 个按规则分类 / 子文件夹 ${sf.keptCount} 个原样保留）`,
+    `${sf.count} 个文件（散文件 ${sf.looseCount} 个：并进同名子文件夹 ${sf.mergedCount} 个 / 按规则新建分类夹 ${sf.classifiedCount} 个）`,
     'source-files',
     depth === 0,
     'source',
@@ -425,25 +431,25 @@ function sourceFolderBlock(sf: PreviewSourceFolder, depth: number): HTMLDivEleme
   outLine.textContent = `→ 输出到：${sf.outputDir}\\`;
   body.appendChild(outLine);
 
-  if (sf.looseCount > 0) {
+  if (sf.subfolders.length > 0) {
     const note = document.createElement('div');
     note.className = 'source-note';
-    note.textContent = `这一层根下的 ${sf.looseCount} 个散文件按规则分到下面这些分类夹：`;
+    note.textContent = '子文件夹（原样保留；跟散文件同名的那个会收下那些散文件）：';
+    body.appendChild(note);
+    for (const sub of sf.subfolders) body.appendChild(subFolderBlock(sub, 0));
+  }
+
+  if (sf.categories.length > 0) {
+    const note = document.createElement('div');
+    note.className = 'source-note';
+    note.textContent = `这一层没有同名子文件夹的散文件，按规则新建分类夹（共 ${sf.classifiedCount} 个）：`;
     body.appendChild(note);
     for (const g of sf.categories) body.appendChild(categoryBlock(g));
-  } else {
+  } else if (sf.looseCount === 0) {
     const none = document.createElement('div');
     none.className = 'empty';
     none.textContent = '（这一层根下没有散文件，所以这里没有分类夹）';
     body.appendChild(none);
-  }
-
-  if (sf.subfolders.length > 0) {
-    const note = document.createElement('div');
-    note.className = 'source-note';
-    note.textContent = '子文件夹里的文件按原样保留（连层级一起搬过去），不再按规则重分：';
-    body.appendChild(note);
-    for (const sub of sf.subfolders) body.appendChild(subFolderBlock(sub, 0));
   }
   return box;
 }

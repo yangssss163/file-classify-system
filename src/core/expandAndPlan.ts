@@ -34,7 +34,7 @@
  */
 import * as fssync from 'fs';
 import * as path from 'path';
-import { pickUniqueName, MAX_RENAME_ATTEMPTS } from './classify';
+import { pickUniqueName, splitFileName, MAX_RENAME_ATTEMPTS } from './classify';
 import { classifyWithMeta } from './classifyWithMeta';
 import type { RuleTable } from './rules';
 import { describeError } from './copyFiles';
@@ -44,7 +44,7 @@ export const MAX_SCAN_DEPTH = 20;
 
 /** 界面上那句人话（预览里必须明确写出来）。只有这一个来源，不许在别处再写一份。 */
 export const FOLDER_KEEP_HINT =
-  '子文件夹里的文件按原样保留（连层级一起搬过去），不再按规则重分；只有散在源文件夹自己那层根下的文件才按规则分类。';
+  '子文件夹里的文件按原样保留（连层级一起搬过去），不再按规则重分；散在源文件夹自己那层根下的文件，先并进同名的子文件夹（如果这一层已经有那个子文件夹），没有同名子文件夹时才按规则建分类夹。';
 
 /* ------------------------------------------------------------------ *
  * 类型
@@ -102,7 +102,9 @@ export interface ScanResult {
 /** 展开出来的目录树：每个源文件夹一个节点，子文件夹挂在 children 上。 */
 export interface ScanNode {
   origin: SourceFolderOrigin;
-  /** 直接躺在这一层根下的文件（这些才按规则分类） */
+  /** 这个节点在**源**里的目录（用来判断「同名位置上是不是被一个文件占着」） */
+  dirPath: string;
+  /** 直接躺在这一层根下的文件（这些才按规则处理） */
   looseFiles: TrackedFile[];
   /** 这一层的子文件夹（按名字排序，顺序稳定） */
   children: ScanNode[];
@@ -110,7 +112,7 @@ export interface ScanNode {
 
 /**
  * 一个文件最终落到哪里（预览与执行**共用同一份**）。
- * `targetDir` 是最终目录（原样保留时 = 原目录在输出里的对应位置；分类时 = 该层 + 分类夹）。
+ * `targetDir` 是最终目录（原样保留时 = 原目录在输出里的对应位置；分类/并入时 = 该层 + 子目录）。
  */
 export interface PlannedFile {
   /** 原文件路径 */
@@ -124,11 +126,14 @@ export interface PlannedFile {
   /**
    * 这个文件是怎么安排的：
    *  - `keep`：子文件夹里的文件 → 按原样保留相对路径，不分类；
-   *  - `classify`：源文件夹自己那层根下的散文件 → 按规则进分类夹（`category` 是分类夹名）。
+   *  - `classify`：源文件夹自己那层根下的散文件 → 进分类夹（`category` 是分类夹名）；
+   *  - `merge`：源文件夹自己那层根下的散文件 → **并进已有的同名子文件夹**（`category` 是那个子文件夹名）。
    */
-  placement: 'keep' | 'classify';
-  /** 分类夹名；`keep` 时为 null */
+  placement: 'keep' | 'classify' | 'merge';
+  /** 分类夹名（`classify`）或并入的子文件夹名（`merge`）；`keep` 时为 null */
   category: string | null;
+  /** 并入/分类时的人话说明（给人看）；原样保留时为 null */
+  mergeReason: string | null;
   /** 是否因同名冲突换过名 */
   renamed: boolean;
 }
@@ -151,15 +156,21 @@ export interface PlannedFolder {
 
   /** 这一份（含子树）的文件总数 = 本层散文件 + 子树里原样保留的 */
   totalFileCount: number;
-  /** 直接躺在这一层根下的散文件个数（顶层才按规则分类） */
+  /** 直接躺在这一层根下的散文件个数（顶层才按规则分类/并入同名子文件夹） */
   looseFileCount: number;
   /** 这一层原样保留的直接文件个数（子文件夹那几层才有） */
   keptFileCount: number;
+  /** 这一层有多少散文件是「并进同名子文件夹」的（顶层才有） */
+  mergedCount: number;
+  /** 这一层有多少散文件是「按规则新建分类夹」的（顶层才有） */
+  classifiedCount: number;
 
-  /** 这一层根下散文件的分类夹（只有顶层源文件夹才有；空分类不列） */
+  /** 这一层根下散文件的分类夹（只含**新建**的分类夹；并进既有子文件夹的那些不在这里） */
   categories: Array<{ category: string; files: PlannedFile[] }>;
-  /** 这一层**原样保留**的直接文件（只有子文件夹那几层才有） */
+  /** 这一层**原样保留**的直接文件（只有子文件夹那几层才有；另有 `mergedInto` 里并入的散文件） */
   keptFiles: PlannedFile[];
+  /** 并进这个子文件夹的散文件（只可能出现在子文件夹那一层；顶层为空） */
+  mergedInto: PlannedFile[];
   /** 它下面的子文件夹（原样保留；空文件夹不列） */
   subfolders: PlannedFolder[];
 }
@@ -264,7 +275,7 @@ function scanNodeAt(
   seenDirs: Set<string>,
 ): ScanOutcome {
   const origin: SourceFolderOrigin = { rootPath, rootName, chain, key: originKeyOf(rootPath, chain) };
-  const node: ScanNode = { origin, looseFiles: [], children: [] };
+  const node: ScanNode = { origin, dirPath: dir, looseFiles: [], children: [] };
   const skipped: SkippedPath[] = [];
 
   let entries: fssync.Dirent[];
@@ -429,16 +440,23 @@ export function targetDirOf(outputDir: string, outputChain: readonly string[]): 
   return outputChain.length === 0 ? outputDir : `${outputDir}${sep}${outputChain.join(path.sep)}`;
 }
 
-/** 这一份（含子树）原样保留的文件个数。 */
+/** 这一份（含子树）原样保留 + 并入的文件个数（不含本层按规则分类的散文件）。 */
 export function countKeptOf(folder: PlannedFolder): number {
-  let n = folder.keptFiles.length;
+  let n = folder.keptFiles.length + folder.mergedInto.length;
   for (const sub of folder.subfolders) n += countKeptOf(sub);
+  return n;
+}
+
+/** 这一份（含子树）里按规则新建分类夹放进去的散文件个数。 */
+export function countClassifiedOf(folder: PlannedFolder): number {
+  let n = folder.categories.reduce((sum, g) => sum + g.files.length, 0);
+  for (const sub of folder.subfolders) n += countClassifiedOf(sub);
   return n;
 }
 
 /** 这一份（含子树）的文件总数。 */
 function countFilesOf(folder: PlannedFolder): number {
-  let n = folder.looseFileCount + folder.keptFiles.length;
+  let n = folder.looseFileCount + folder.keptFiles.length + folder.mergedInto.length;
   for (const sub of folder.subfolders) n += countFilesOf(sub);
   return n;
 }
@@ -467,9 +485,29 @@ export function buildPlan(options: PlanOptions): PlanResult {
   const takenByDir = new Map<string, Set<string>>();
   const files: PlannedFile[] = [];
 
+  /** 某个目标目录里已经用掉的名字（懒加载）。 */
+  const takenIn = (dir: string): Set<string> => {
+    const key = dir.toLowerCase();
+    let taken = takenByDir.get(key);
+    if (!taken) {
+      taken = new Set<string>();
+      takenByDir.set(key, taken);
+    }
+    return taken;
+  };
+
+  /** 在这个目录里挑一个不冲突的文件名，并把它记下来。 */
+  const placeName = (dir: string, wanted: string): { name: string; renamed: boolean } => {
+    const taken = takenIn(dir);
+    const picked = pickUniqueName(wanted, taken);
+    const finalName = picked.name === null ? wanted : picked.name;
+    taken.add(finalName.toLowerCase());
+    return { name: finalName, renamed: picked.renamed };
+  };
+
   /**
    * 处理一个源文件夹节点。
-   * @param classifyHere 这一层根下的文件是否按规则分类 —— **只有顶层源文件夹才是 true**；
+   * @param classifyHere 这一层根下的散文件是否走「并入同名子文件夹 / 按规则分类」——**只有顶层源文件夹才是 true**；
    *   子文件夹里的文件一律**原样保留**（连层级一起搬，不再按规则重分）。
    */
   const processNode = (
@@ -486,78 +524,139 @@ export function buildPlan(options: PlanOptions): PlanResult {
       renamed,
       subfolders: [],
       keptFiles: [],
+      mergedInto: [],
       categories: [],
       looseFileCount: 0,
       keptFileCount: 0,
+      mergedCount: 0,
+      classifiedCount: 0,
       totalFileCount: 0,
     };
 
-    // ① 这一层根下的文件：
-    //    - 顶层源文件夹：**散文件按规则分类**，进 `outputDirPath\<分类夹>\`；
-    //    - 子文件夹：**原样保留**，直接待在 `outputDirPath\` 这一层。
-    for (const file of node.looseFiles) {
-      if (classifyHere) {
-        const matched = classifyWithMeta(rules, file.fullPath, file.name);
-        const categoryDir = joinedPath(outputDirPath, matched.folder);
-        const dirKey = categoryDir.toLowerCase();
-        let taken = takenByDir.get(dirKey);
-        if (!taken) {
-          taken = new Set<string>();
-          takenByDir.set(dirKey, taken);
-        }
-        const picked = pickUniqueName(file.name, taken);
-        const finalName = picked.name === null ? file.name : picked.name;
-        taken.add(finalName.toLowerCase());
-        const entry: PlannedFile = {
-          fullPath: file.fullPath,
-          name: finalName,
-          origin: node.origin,
-          targetDir: categoryDir,
-          placement: 'classify',
-          category: matched.folder,
-          renamed: picked.renamed,
-        };
-        files.push(entry);
-        planned.looseFileCount++;
-        let bucket = planned.categories.find((c) => c.category === matched.folder);
-        if (!bucket) {
-          bucket = { category: matched.folder, files: [] };
-          planned.categories.push(bucket);
-        }
-        bucket.files.push(entry);
-      } else {
-        const dirKey = outputDirPath.toLowerCase();
-        let taken = takenByDir.get(dirKey);
-        if (!taken) {
-          taken = new Set<string>();
-          takenByDir.set(dirKey, taken);
-        }
-        const picked = pickUniqueName(file.name, taken);
-        const finalName = picked.name === null ? file.name : picked.name;
-        taken.add(finalName.toLowerCase());
-        const entry: PlannedFile = {
-          fullPath: file.fullPath,
-          name: finalName,
-          origin: node.origin,
-          targetDir: outputDirPath,
-          placement: 'keep',
-          category: null,
-          renamed: picked.renamed,
-        };
-        files.push(entry);
-        planned.keptFiles.push(entry);
-        planned.keptFileCount++;
-      }
-    }
-    planned.categories.sort((a, b) => a.category.localeCompare(b.category));
-
-    // ② 子文件夹：**原样保留**（结构照搬，名字在同一段输出路径里不撞）
+    // ① 先把子文件夹安顿好（原样保留，结构照搬；名字在同一段输出路径里不撞）。
+    //    必须先做这一步：散文件要看「这一层有没有同名子文件夹」才能决定去处。
     for (const child of node.children) {
       const childName = child.origin.chain[child.origin.chain.length - 1];
       const picked = pickUniqueFolderName(childName, '\u0000' + outputDirPath.toLowerCase(), usedByScope);
       const childDir = joinedPath(outputDirPath, picked.name);
       planned.subfolders.push(processNode(child, picked.name, childDir, false, picked.renamed));
     }
+
+    // ② 这一层根下的文件：
+    //    - 顶层源文件夹的散文件：**先并进同名子文件夹**，没有同名子文件夹才按规则建分类夹；
+    //    - 子文件夹里的文件：**原样保留**，直接待在 outputDirPath 这一层。
+    for (const file of node.looseFiles) {
+      if (!classifyHere) {
+        const placed = placeName(outputDirPath, file.name);
+        const entry: PlannedFile = {
+          fullPath: file.fullPath,
+          name: placed.name,
+          origin: node.origin,
+          targetDir: outputDirPath,
+          placement: 'keep',
+          category: null,
+          mergeReason: null,
+          renamed: placed.renamed,
+        };
+        files.push(entry);
+        planned.keptFiles.push(entry);
+        planned.keptFileCount++;
+        continue;
+      }
+
+      // 散文件（只在这一层、只有顶层源文件夹走这条路）：
+      //  1. 这一层已有的**同名子文件夹**可以收下它 → 并进去（不再按规则另建分类夹）；
+      //  2. 没有同名子文件夹 → 按规则建分类夹；
+      //  3. 同名位置上其实是**文件** → 不许覆盖它，退回第 2 步并给一句说明。
+      // 「同名」= 这个文件自己的名字（含后缀）去掉扩展名，跟同一层子文件夹的名字比；
+      // 大小写不敏感（Windows 语义），而且只跟**同一层**比，不跨层。
+      const stem = splitFileName(file.name).stem;
+      const sameNameDir = joinedPath(outputDirPath, stem);
+      let mergeInto: PlannedFolder | null =
+        planned.subfolders.find((s) => s.outputName.toLowerCase() === stem.toLowerCase()) ?? null;
+      let mergeReason = mergeInto
+        ? `这一层已经有同名的子文件夹 ${mergeInto.outputName}\\，散文件并进它（不另建分类夹）`
+        : '';
+      if (mergeInto) {
+        // 万一那个位置上已经被一个同名**文件**占着（不许覆盖），就退回按规则建分类夹
+        try {
+          const st = fssync.statSync(sameNameDir);
+          if (!st.isDirectory()) {
+            mergeReason = `这一层有个同名的「文件」占着 ${stem} 这个名字，没有动它；按规则新建分类夹`;
+            mergeInto = null;
+          }
+        } catch {
+          /* 目录还不存在，属正常 */
+        }
+      } else {
+        // 没找到同名子文件夹：这里再确认一下「同名位置上是不是被一个**文件**占着」
+        // 两种情形都算：
+        //  a) 这一层真的有个文件，名字正好等于这个文件夹名（例如散文件 发票.png → 名字 发票）；
+        //  b) 这一层有个文件，名字正好等于**规则算出来的分类夹名**（例如有个文件叫 01_图片，
+        //     那么散文件按规则要去的 01_图片 这个位置就被它占着）。
+        const candidates = [stem, classifyWithMeta(rules, file.fullPath, file.name).folder];
+        for (const name of candidates) {
+          if (name.length === 0) continue;
+          try {
+            const st = fssync.statSync(joinedPath(node.dirPath, name));
+            if (!st.isDirectory()) {
+              mergeReason = `这一层有个同名的「文件」占着 ${name} 这个名字，没有动它；按规则新建分类夹`;
+              break;
+            }
+          } catch {
+            /* 没有这个东西，属正常 */
+          }
+        }
+      }
+
+      if (mergeInto) {
+        const placed = placeName(mergeInto.outputDir, file.name);
+        const entry: PlannedFile = {
+          fullPath: file.fullPath,
+          name: placed.name,
+          origin: node.origin,
+          targetDir: mergeInto.outputDir,
+          placement: 'merge',
+          category: mergeInto.outputName,
+          mergeReason,
+          renamed: placed.renamed,
+        };
+        files.push(entry);
+        mergeInto.mergedInto.push(entry);
+        mergeInto.keptFileCount++;
+        planned.looseFileCount++;
+        planned.mergedCount++;
+        continue;
+      }
+
+      const matched = classifyWithMeta(rules, file.fullPath, file.name);
+      const categoryName = matched.folder;
+      const categoryDir = joinedPath(outputDirPath, categoryName);
+      const placed = placeName(categoryDir, file.name);
+      const entry: PlannedFile = {
+        fullPath: file.fullPath,
+        name: placed.name,
+        origin: node.origin,
+        targetDir: categoryDir,
+        placement: 'classify',
+        category: categoryName,
+        mergeReason:
+          mergeReason.length > 0
+            ? mergeReason
+            : `这一层没有同名的子文件夹，按规则算出来是「${categoryName}」，新建分类夹`,
+        renamed: placed.renamed,
+      };
+      files.push(entry);
+      planned.looseFileCount++;
+      planned.classifiedCount++;
+      let bucket = planned.categories.find((c) => c.category === categoryName);
+      if (!bucket) {
+        bucket = { category: categoryName, files: [] };
+        planned.categories.push(bucket);
+      }
+      bucket.files.push(entry);
+    }
+    planned.categories.sort((a, b) => a.category.localeCompare(b.category));
 
     planned.totalFileCount = countFilesOf(planned);
     return planned;

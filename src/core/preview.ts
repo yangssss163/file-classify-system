@@ -56,9 +56,9 @@ export interface PreviewFolder {
 
 /**
  * 预览里「某个源文件夹自己那一份」：源文件夹各归各，一眼看出哪一份是哪个源路径来的。
- * 新语义（文件夹优先）下，这一份里有两种东西：
- *  - `categories`：这一层根下**散文件**按规则去的分类夹；
- *  - `subfolders`：**原样保留**的子树（结构照搬，不按规则重分）。
+ * 最终语义（散落的文件以子文件夹优先）下，这一份里有两种东西：
+ *  - `subfolders`：**原样保留**的子树（结构照搬，不按规则重分）；某个子文件夹如果跟散文件同名，散文件会并进来；
+ *  - `categories`：这一层根下散文件**按规则新建**的分类夹（没有同名子文件夹时才建）。
  * （分组显示用，绝不落盘。）
  */
 export interface PreviewSourceFolder {
@@ -78,15 +78,19 @@ export interface PreviewSourceFolder {
   outputDir: string;
   /** 这一份（含子树）的文件总数 */
   count: number;
-  /** 直接躺在这一层根下、按规则分类的散文件个数 */
+  /** 直接躺在这一层根下、要按规则处理（并入同名子文件夹 / 新建分类夹）的散文件个数 */
   looseCount: number;
-  /** 这一份下面原样保留的文件个数（子文件夹里的） */
+  /** 这一份下面原样保留的文件个数（子文件夹里的 + 并进子文件夹的散文件） */
   keptCount: number;
+  /** 有多少散文件是「并进同名子文件夹」的 */
+  mergedCount: number;
+  /** 有多少散文件是「按规则新建分类夹」的 */
+  classifiedCount: number;
   /** 是不是因为「同段路径里有同名文件夹」改过名 */
   renamed: boolean;
-  /** 这一层根下散文件的分类夹（按规则算出来的；空分类不列） */
+  /** 这一层根下散文件按规则**新建**的分类夹（空分类不列） */
   categories: PreviewFolder[];
-  /** 原样保留的子树（空文件夹不列） */
+  /** 原样保留的子树（空文件夹不列；里面的散文件已并进来） */
   subfolders: PreviewSubFolder[];
 }
 
@@ -100,8 +104,10 @@ export interface PreviewSubFolder {
   outputPath: string;
   /** 这个目录（含下面整棵子树）有几个文件 */
   count: number;
-  /** 直接躺在这个目录里的文件 */
+  /** 直接躺在这个目录里的文件（含并进来的散文件） */
   files: PreviewFile[];
+  /** 其中是「散文件并进来」的那几个（用来在界面上说清「并进同名子文件夹」） */
+  mergedIn: PreviewFile[];
   /** 它下面的子目录 */
   children: PreviewSubFolder[];
 }
@@ -152,12 +158,14 @@ export interface PreviewTree {
   roots: PreviewRoot[];
   /** 被跳过的路径与原因（读不了的子文件夹、符号链接、太深的目录…）；一个都没有时为空数组 */
   skipped: SkippedPath[];
-  /** 界面上必须写出来的那句人话：子文件夹按原样保留、只有散文件按规则分类 */
+  /** 界面上必须写出来的那句人话：子文件夹按原样保留、散文件先并进同名子文件夹、没有才按规则分类 */
   keepHint: string;
-  /** 按规则分类的散文件个数（合计） */
+  /** 按规则**新建分类夹**放进去的散文件个数（合计） */
   classifyCount: number;
-  /** 原样保留的文件个数（合计） */
+  /** 原样保留的文件个数（合计，含子文件夹里的） */
   keepCount: number;
+  /** 并进同名子文件夹的散文件个数（合计） */
+  mergeCount: number;
 }
 
 /** 没选输出文件夹 / 没拖入任何文件时的提示（人话，不抛错）。 */
@@ -324,10 +332,11 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
     }
   }
 
-  // 这一次的文件总数与两种去处的个数（原样保留的也算总数，只是不进分类夹）
+  // 这一次的文件总数与三种去处的个数（原样保留的也算总数，只是不进分类夹）
   const plannedFiles = tracked && plan ? plan.files : [];
   const classifyCount = tracked && plan ? plannedFiles.filter((f) => f.placement === 'classify').length : entries.length;
   const keepCount = tracked && plan ? plannedFiles.filter((f) => f.placement === 'keep').length : 0;
+  const mergeCount = tracked && plan ? plannedFiles.filter((f) => f.placement === 'merge').length : 0;
   const totalCount = tracked && plan ? plannedFiles.length : entries.length;
 
   const folders: PreviewFolder[] = [];
@@ -337,7 +346,7 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
     counts[folder] = list.length;
   }
 
-  // 按源文件夹分组（每一份各归各）：份内再分「原样保留的子树」与「这一层散文件的分类夹」
+  // 按源文件夹分组（每一份各归各）：份内再分「原样保留的子树（含并入的散文件）」与「按规则新建的分类夹」
   const rootsOut: PreviewRoot[] = [];
   let sourceFolderCount = 0;
   if (tracked && plan) {
@@ -352,6 +361,8 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
       count: planned.totalFileCount,
       looseCount: planned.looseFileCount,
       keptCount: countKeptOf(planned),
+      mergedCount: planned.mergedCount,
+      classifiedCount: planned.classifiedCount,
       renamed: planned.renamed,
       categories: planned.categories.map((g) => ({
         folder: g.category,
@@ -366,8 +377,9 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
       sourcePath: sourcePathOf(sub.origin),
       outputPath: sub.outputDir,
       count: sub.totalFileCount,
-      // 这一层原样保留的文件就是它自己的直接文件（子目录里的留在各自节点上）
-      files: sub.keptFiles.map((f) => previewItemOf(f.fullPath, '')),
+      // 这一层原样保留的文件 + 并进来的散文件（子目录里的留在各自节点上）
+      files: sub.keptFiles.concat(sub.mergedInto).map((f) => previewItemOf(f.fullPath, '')),
+      mergedIn: sub.mergedInto.map((f) => previewItemOf(f.fullPath, '')),
       children: sub.subfolders.map((c) => makeSubFolder(c)),
     });
 
@@ -404,6 +416,7 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
       keepHint: FOLDER_KEEP_HINT,
       classifyCount,
       keepCount,
+      mergeCount,
     },
   };
 }

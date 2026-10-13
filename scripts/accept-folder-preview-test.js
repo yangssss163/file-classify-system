@@ -70,6 +70,24 @@ function withoutSetSourceRoots(productSource) {
   return productSource.split(SET_ROOTS_CALL).join('void 0;');
 }
 
+/**
+ * 「不并进同名子文件夹」的旧语义副本（控制台点名要的诱饵）：
+ * 把产物里「说明哪些散文件并进了同名子文件夹」的那句话抽成空串 ——
+ * 于是界面看着还是分组的，但看不出「散文件并进了同名子文件夹」。
+ * 只替换一句赋值（不动控制流），产物语法仍然正常。
+ */
+function withoutMergeNote(productSource) {
+  // 用一个不含模板字面量/插值的标记，免得多层转义把匹配搞坏
+  const marker = '个是这次并进来的散文件';
+  const at = productSource.indexOf(marker);
+  if (at < 0) return productSource;
+  const start = productSource.lastIndexOf('note.textContent', at);
+  if (start < 0) return productSource;
+  const end = productSource.indexOf('\n', at);
+  if (end < 0) return productSource;
+  return productSource.slice(0, start) + "note.textContent = '';" + productSource.slice(end);
+}
+
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 const results = [];
@@ -224,12 +242,17 @@ function hasNestedGroup(node, className) {
  * 假 window.organizer：记录调用 + 给出一份按源文件夹分组的预览树
  * ------------------------------------------------------------------ */
 
-/** 事实上的测试结构：一个顶层文件夹「下载」（下面有子文件夹），外加第二个顶层文件夹「另一处」。 */
+/**
+ * 事实上的测试结构：一个顶层文件夹「下载」（下面有子文件夹，且有一个跟散文件同名的「发票」子文件夹），
+ * 外加第二个顶层文件夹「另一处」。用于验证最终语义：散文件先并进同名子文件夹。
+ */
 function makeFixture(tmpRoot) {
   const srcRoot = path.join(tmpRoot, 'src');
   const files = {
     [path.join(srcRoot, '下载', '散1.jpg')]: '01_图片',
     [path.join(srcRoot, '下载', '散2.pdf')]: '02_文档',
+    [path.join(srcRoot, '下载', '发票.pdf')]: '02_文档',
+    [path.join(srcRoot, '下载', '发票', '老发票.pdf')]: '02_文档',
     [path.join(srcRoot, '下载', '照片', '图1.png')]: '01_图片',
     [path.join(srcRoot, '下载', '照片', '婚纱', '纱1.jpg')]: '01_图片',
     [path.join(srcRoot, '下载', '文档', '文1.docx')]: '02_文档',
@@ -378,7 +401,7 @@ async function runInWindowStub(source, label, organizer) {
  * ------------------------------------------------------------------ */
 
 const LEGACY_CLASSIFY_ALL_PRODUCT = [
-  '// 旧语义界面产物：子文件夹里的文件也被塞进分类夹（分组说明也没有）',
+  '// 旧语义界面产物：不并进同名子文件夹（无论有没有同名子文件夹都按规则另建分类夹）',
   'const api = window.organizer;',
   'const el = {',
   "  drop: document.getElementById('drop'),",
@@ -405,7 +428,6 @@ const LEGACY_CLASSIFY_ALL_PRODUCT = [
   '    if (folders.length === 0) { el.fileCount.textContent = "已选 " + selectedFiles.length + " 个文件"; return; }',
   '    for (const r of folders) if (selectedRoots.indexOf(r) < 0) selectedRoots.push(r);',
   '    api.expand(folders).then((scan) => {',
-  '      // 旧语义：展开出来的所有文件都当一个普通文件清单（预览时再按规则分类）',
   '      merge(scan.files.map((f) => f.fullPath));',
   '      el.fileCount.textContent = "已选 " + selectedFiles.length + " 个文件（来自 " + selectedRoots.length + " 个文件夹）";',
   '    });',
@@ -420,7 +442,7 @@ const LEGACY_CLASSIFY_ALL_PRODUCT = [
   'el.pickFolders.addEventListener("click", () => { api.pickFolders().then((list) => accept(list)); });',
   'el.pickOut.addEventListener("click", () => { api.pickOutputDir().then((d) => { outputDir = d; }); });',
   'el.preview.addEventListener("click", () => {',
-  '  // 旧语义：直接把所有文件（含子文件夹里的）按规则分类，没有分组、也没有那句说明',
+  '  // 旧语义：所有文件（含散文件）一律按规则另建分类夹，不看有没有同名子文件夹',
   '  api.preview(selectedFiles.slice(), outputDir, []).then((outcome) => {',
   '    if (!outcome || outcome.ok !== true) return;',
   '    el.previewWarning.textContent = "以下是预览，还没有复制任何文件。";',
@@ -574,25 +596,26 @@ async function inspectFolderSupport(productSource, label, ctx) {
       if (!/个文件/.test(text)) hits.push(`某一层源文件夹没有写清有几个文件：「${text.slice(0, 80)}」`);
     }
 
-    // 新语义：界面上必须**明确写出那句人话**（子文件夹按原样保留、只有散文件按规则分类）
+    // 新语义：界面上必须**明确写出那句人话**（子文件夹按原样保留；散文件先并进同名子文件夹，没有才按规则分类）
     const keepNodes = findByClass(treeEl, 'keep');
     if (keepNodes.length === 0) {
       hits.push('预览树里没有「原样保留的子树」节点（class="keep"）——子文件夹里的文件没按新语义画出来');
     }
     const hint = treeEl.children.find((c) => c.className === 'keep-hint');
     if (!hint) {
-      hits.push('预览树里没有那句说明（class="keep-hint"）——界面上看不出「子文件夹按原样保留」');
+      hits.push('预览树里没有那句说明（class="keep-hint"）——界面上看不出「子文件夹按原样保留 / 散文件先并进同名子文件夹」');
     } else {
       const hintText = String(hint.textContent || '');
-      if (!/原样保留/.test(hintText)) {
-        hits.push(`那句说明没说「原样保留」：「${hintText}」`);
-      }
-      if (!/散|分类/.test(hintText)) {
-        hits.push(`那句说明没说「只有散文件按规则分类」：「${hintText}」`);
-      }
-      if (!/子文件夹/.test(hintText)) {
-        hits.push(`那句说明没说清「子文件夹」：「${hintText}」`);
-      }
+      if (!/原样保留/.test(hintText)) hits.push(`那句说明没说「原样保留」：「${hintText}」`);
+      if (!/同名子文件夹/.test(hintText)) hits.push(`那句说明没说「先并进同名子文件夹」：「${hintText}」`);
+      if (!/规则/.test(hintText)) hits.push(`那句说明没说「没有同名的才按规则分类」：「${hintText}」`);
+      if (!/子文件夹/.test(hintText)) hits.push(`那句说明没说清「子文件夹」：「${hintText}」`);
+    }
+
+    // 「并进同名子文件夹」这件事必须在界面上看得见（不能只是分组好看）
+    const mergedNote = /个是这次并进来的散文件/.test(treeText);
+    if (!mergedNote) {
+      hits.push('预览树里看不出「有散文件并进了同名子文件夹」（没有那行说明）');
     }
     for (const want of ['下载', '照片', '文档', '婚纱', '另一处']) {
       if (!new RegExp(want).test(treeText)) hits.push(`预览树里看不到「${want}」这一层：${treeText.slice(0, 120)}`);
@@ -768,8 +791,18 @@ async function inspectFolderSupport(productSource, label, ctx) {
         `旧语义产物被抓到的理由与新语义无关：${legacyHits.join(' | ')}`,
       );
 
-      // (2) 把真产物里「原样保留的子树」那一块抽掉（其余照旧）：分组/说明必然缺 —— 必须判失败
-      //     （换成空语句，保证产物语法仍然正常，不至于「因为跑不起来」侥幸判失败）
+      // (2) 把真产物里「并把进同名子文件夹的散文件列出来」那一段抽掉（其余照旧）：
+      //     这正是「不并进同名子文件夹（都按规则另建分类夹）」的观感 —— 必须判失败
+      const noMergeNote = withoutMergeNote(rendererJs);
+      ok(noMergeNote !== rendererJs, '没能造出「不说明并入同名子文件夹」的产物样本');
+      const noMergeHits = await inspectFolderSupport(noMergeNote, 'crippled-no-merge-note.js', ctx);
+      ok(
+        noMergeHits.some((h) => /看不出|并进/.test(h)),
+        `「不并进同名子文件夹」的产物没有被抓到：${noMergeHits.join(' | ') || '（竟然全过）'}`,
+      );
+      log(`      抽掉「并进同名子文件夹」那段后证据（前 3 条）：${noMergeHits.slice(0, 3).join(' | ')}`);
+
+      // (3) 把真产物里「原样保留的子树」那一块抽掉（其余照旧）：分组必然缺 —— 必须判失败
       const KEEP_BLOCK = 'body.appendChild(subFolderBlock(sub, 0));';
       const noKeepBlock = rendererJs.split(KEEP_BLOCK).join('void 0;');
       ok(noKeepBlock !== rendererJs, '没能造出「不画原样保留子树」的产物样本');
@@ -777,7 +810,7 @@ async function inspectFolderSupport(productSource, label, ctx) {
       ok(noKeepHits.length > 0, '「不画原样保留子树」的产物被说 OK —— 探针是死的');
       log(`      抽掉「原样保留子树」后的证据（前 3 条）：${noKeepHits.slice(0, 3).join(' | ')}`);
 
-      // (3) 把真产物里那句说明抽掉（其余照旧）：必须判失败（控制台要求界面上必须写出那句话）
+      // (4) 把真产物里那句说明抽掉（其余照旧）：必须判失败（控制台要求界面上必须写出那句话）
       const noHint = rendererJs
         .split("hint.textContent = tree.keepHint;")
         .join("hint.textContent = '';");
@@ -789,17 +822,17 @@ async function inspectFolderSupport(productSource, label, ctx) {
       );
       log(`      抽掉「那句说明」后的证据（前 3 条）：${noHintHits.slice(0, 3).join(' | ')}`);
 
-      // (4) 把真产物里「把源文件夹传给预览」这一步抽掉：分组必然画不出来 → 必须判失败
+      // (5) 把真产物里「把源文件夹传给预览」这一步抽掉：分组必然画不出来 → 必须判失败
       const noRootsToPreview = withoutSetSourceRoots(rendererJs);
       ok(noRootsToPreview !== rendererJs, '没能造出「不把源文件夹传给预览」的产物样本');
       const noRootsHits = await inspectFolderSupport(noRootsToPreview, 'crippled-no-setroots.js', ctx);
       ok(noRootsHits.length > 0, '「不把源文件夹传给预览」的产物被说 OK —— 探针是死的');
       log(`      抽掉「放下源文件夹」后的证据（前 3 条）：${noRootsHits.slice(0, 3).join(' | ')}`);
 
-      // (5) 真产物必须通过（这一遍是单独一遍，不复用上面的结果）
+      // (6) 真产物必须通过（这一遍是单独一遍，不复用上面的结果）
       const liveHits = await inspectFolderSupport(rendererJsProbe, 'current-renderer-folders.js', ctx);
       ok(liveHits.length === 0, `真产物被判不合格（探针误报）：${liveHits.join(' | ')}`);
-      log('      探针：旧语义产物判失败、抽掉原样保留判失败、抽掉说明判失败、抽掉源文件夹判失败、真产物判通过');
+      log('      探针：旧语义产物判失败、抽掉并入说明判失败、抽掉原样保留判失败、抽掉说明判失败、抽掉源文件夹判失败、真产物判通过');
     });
   } catch (err) {
     log(`FAIL: 测试过程本身出错 -> ${(err && err.stack) || err}`);

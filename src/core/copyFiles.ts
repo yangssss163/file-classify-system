@@ -139,7 +139,19 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
    * 先把目标路径全算好（预览与执行共用同一个 `planFolders`），再动手复制。
    * 有 roots 时走「文件夹优先」：子文件夹里的文件原样保留相对路径，只有源文件夹各层根下的散文件按规则进分类夹。
    */
-  const planned = new Map<string, { dir: string; name: string; folder: string; root: string | null; chain: string[] | null; renamed: boolean; placement: 'keep' | 'classify' }>();
+  const planned = new Map<
+    string,
+    {
+      dir: string;
+      name: string;
+      folder: string;
+      root: string | null;
+      chain: string[] | null;
+      renamed: boolean;
+      placement: 'keep' | 'classify' | 'merge';
+      mergeReason: string | null;
+    }
+  >();
   let plan: PlanResult | null = null;
   const roots = Array.from(options.roots ?? []).map((r) => String(r)).filter((r) => r.length > 0);
   if (roots.length > 0) {
@@ -149,11 +161,12 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
         dir: f.targetDir,
         name: f.name,
         // 原样保留的文件不算「进哪个分类夹」：`folder` 留空串，界面上也就不会说它被分类了
-        folder: f.placement === 'classify' ? (f.category ?? '') : '',
+        folder: f.placement === 'keep' ? '' : (f.category ?? ''),
         root: f.origin.rootPath,
         chain: f.origin.chain.slice(),
         renamed: f.renamed,
         placement: f.placement,
+        mergeReason: f.mergeReason,
       });
     }
   }

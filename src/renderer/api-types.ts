@@ -47,7 +47,8 @@ export interface PreviewFolder {
 
 /**
  * 预览里「某个源文件夹自己那一份」。
- * 新语义（文件夹优先）：份内分两块 —— 本层散文件按规则去的分类夹、原样保留的子树。
+ * 最终语义（散落的文件以子文件夹优先）：份内两块 —— 原样保留的子树（含并入的散文件）、
+ * 以及「这一层没有同名子文件夹时才按规则新建」的分类夹。
  */
 export interface PreviewSourceFolder {
   name: string;
@@ -60,14 +61,18 @@ export interface PreviewSourceFolder {
   outputDir: string;
   /** 这一份（含子树）的文件总数 */
   count: number;
-  /** 直接躺在这一层根下、按规则分类的散文件个数 */
+  /** 直接躺在这一层根下、要按规则处理的散文件个数 */
   looseCount: number;
-  /** 这一份下面原样保留的文件个数（子文件夹里的） */
+  /** 这一份下面原样保留的文件个数（子文件夹里的 + 并进子文件夹的散文件） */
   keptCount: number;
+  /** 有多少散文件是「并进同名子文件夹」的 */
+  mergedCount: number;
+  /** 有多少散文件是「按规则新建分类夹」的 */
+  classifiedCount: number;
   renamed: boolean;
-  /** 这一层根下散文件的分类夹 */
+  /** 这一层根下散文件按规则**新建**的分类夹 */
   categories: PreviewFolder[];
-  /** 原样保留的子树 */
+  /** 原样保留的子树（含并进来的散文件） */
   subfolders: PreviewSubFolder[];
 }
 
@@ -78,7 +83,10 @@ export interface PreviewSubFolder {
   /** 输出里的路径（相对输出根） */
   outputPath: string;
   count: number;
+  /** 直接躺在这个目录里的文件（含并进来的散文件） */
   files: PreviewFile[];
+  /** 其中是「散文件并进来」的那几个 */
+  mergedIn: PreviewFile[];
   children: PreviewSubFolder[];
 }
 
@@ -117,12 +125,14 @@ export interface PreviewTree {
   roots: PreviewRoot[];
   /** 被跳过的路径与原因（读不了的子文件夹、符号链接、太深的目录…） */
   skipped: { fullPath: string; reason: string; name?: string }[];
-  /** 界面上必须写出来的那句人话：子文件夹按原样保留、只有散文件按规则分类 */
+  /** 界面上必须写出来的那句人话：子文件夹按原样保留、散文件先并进同名子文件夹、没有才按规则分类 */
   keepHint: string;
-  /** 按规则分类的散文件个数（合计） */
+  /** 按规则**新建分类夹**放进去的散文件个数（合计） */
   classifyCount: number;
   /** 原样保留的文件个数（合计） */
   keepCount: number;
+  /** 并进同名子文件夹的散文件个数（合计） */
+  mergeCount: number;
 }
 
 /** 被跳过的路径与原因（展开文件夹时）。 */
