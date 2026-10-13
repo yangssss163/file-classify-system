@@ -35,7 +35,7 @@ function newRuleId(): string {
 
 /**
  * 造一条全新的空规则。
- * 这里只负责「造」，不负责「放到哪」——放置位置由 `addRule()` 决定（必须是末尾）。
+ * 这里只负责「造」，不负责「放到哪」——放置位置由 `addRule()` 决定（放在第一行）。
  */
 function makeNewRule(): Rule {
   return {
@@ -47,18 +47,18 @@ function makeNewRule(): Rule {
 }
 
 /**
- * 新增规则：**追加到规则表末尾**，排在所有已有规则之后。
+ * 新增规则：**插到规则表第一行**，也就是优先级最高、第一条命中生效的那一条。
  *
- * 为什么必须是末尾：规则表从上往下求值、第一条命中的生效，而列表里的行顺序**就是**这个数组的顺序
- * （只有这一套顺序，不拆成「显示顺序」和「求值顺序」两套）。新规则要是插到最前，它会永远抢先命中，
- * 用户已经配好的那套规则等于被架空 —— 用起来就是「加了一条规则，结果全乱套」。
- * 想让新规则优先，用行上的「上移」自己挪。
+ * 为什么是第一行（用户明确选的）：规则表从上往下求值、第一条命中的生效，而列表里的行顺序
+ * **就是**这个数组的顺序（只有这一套顺序，不拆成「显示顺序」和「求值顺序」两套）。
+ * 新加的规则放在最前，用户刚配的这条会立刻生效、原来那套规则排在它后面；
+ * 不想让它优先，用行上的「下移」把它挪下去。
  *
- * @returns 新规则在表里的下标（= 最后一个位置），便于核对
+ * @returns 新规则在表里的下标（= 0，第一行），便于核对
  */
 function addRule(rules: Rule[]): number {
-  rules.push(makeNewRule());
-  return rules.length - 1;
+  rules.unshift(makeNewRule());
+  return 0;
 }
 
 /**
@@ -651,9 +651,11 @@ async function loadRulesFromDisk(): Promise<void> {
 
 listen(el.ruleAdd, 'click', () => {
   const next = currentRules.slice();
-  addRule(next); // 追加到末尾：新规则不许抢在已有规则前面
+  addRule(next); // 插到第一行：新规则最优先，第一条命中就生效
   setRules(next);
-  setRuleStatus(`已新增 1 条规则（排在最后一行，第 ${next.length} 行），当前共 ${next.length} 条（记得点「保存规则」）`);
+  setRuleStatus(
+    `已新增 1 条规则（已插到第一行，最优先命中；不想让它优先就点「下移」），当前共 ${next.length} 条（记得点「保存规则」）`,
+  );
 });
 
 listen(el.ruleDefault, 'click', () => {

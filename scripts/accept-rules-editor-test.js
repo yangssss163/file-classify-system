@@ -341,13 +341,13 @@ const LEGACY_RULE_PRODUCT = [
 ].join('\n');
 
 /**
- * 内存里现造的「新规则插到首行」的界面产物：
+ * 内存里现造的「新规则追加到末尾」的界面产物：
  * 规则编辑器该有的元素都在、预览也把规则传下去了（所以别的判据都过得去），
- * 只有插入位置是错的 —— `currentRules.unshift(...)` 让新规则抢在所有已有规则前面。
- * 用来反证「新增规则排在末尾」那条断言是活的。
+ * 只有插入位置不对 —— `currentRules.push(...)` 把新规则放到了所有已有规则后面。
+ * 用来反证「新增规则排在第一行」这条断言是活的。
  */
-const FRONT_INSERT_PRODUCT = [
-  '// 有缺陷的界面产物：新增规则被插到首行（会架空已有规则）',
+const APPEND_PRODUCT = [
+  '// 有缺陷的界面产物：新增规则被追加到末尾（不会优先命中）',
   'const api = window.organizer;',
   'const el = {',
   "  add: document.getElementById('rule-add'),",
@@ -376,8 +376,8 @@ const FRONT_INSERT_PRODUCT = [
   '  });',
   '}',
   'el.add.addEventListener("click", () => {',
-  '  // 缺陷：插到最前面',
-  "  currentRules.unshift({ id: 'x' + currentRules.length, name: '新分类', enabled: true, condition: {} });",
+  '  // 缺陷：追加到末尾（新规则不优先）',
+  "  currentRules.push({ id: 'x' + currentRules.length, name: '新分类', enabled: true, condition: {} });",
   '  draw();',
   '});',
   'el.def.addEventListener("click", () => { api.loadRules().then((r) => { currentRules = r.rules; draw(); }); });',
@@ -456,10 +456,10 @@ async function inspectRuleEditor(productSource, label) {
 }
 
 /**
- * 「新增规则必须排在末尾」这条断言本体：在窗口式桩里真点「新增规则」，看行的顺序。
+ * 「新增规则必须排在第一行」这条断言本体：在窗口式桩里真点「新增规则」，看行的顺序。
  * 返回证据数组（空 = 没问题）。
  */
-async function inspectAddRuleGoesLast(productSource, label, expectedDefaultCount) {
+async function inspectAddRuleGoesFirst(productSource, label, expectedDefaultCount) {
   const hits = [];
   const recording = makeRecordingOrganizer();
   const run = await runInWindowStub(productSource, label, recording.organizer);
@@ -491,7 +491,7 @@ async function inspectAddRuleGoesLast(productSource, label, expectedDefaultCount
     return hits;
   }
 
-  // 第 1 次新增：新规则必须出现在最后一个位置
+  // 第 1 次新增：新规则必须在第一行，原来那几条整体往后挪一位、相对顺序不变
   addBtn.dispatch('click', { preventDefault() {} });
   await flush();
   const afterFirst = rowNames();
@@ -499,19 +499,18 @@ async function inspectAddRuleGoesLast(productSource, label, expectedDefaultCount
     hits.push(`after the 1st add the list should have ${expectedDefaultCount + 1} rows, got ${afterFirst.length}`);
     return hits;
   }
-  // 新规则必须在最后一行，且第一行必须还是原来那条（插到首行/没追加都会在这里露出来）
-  if (afterFirst[afterFirst.length - 1] === lastBefore) {
-    hits.push('the last row did not change after adding -> the new rule was not appended');
+  if (afterFirst[afterFirst.length - 1] !== lastBefore) {
+    hits.push(`the last row changed after adding: it became "${afterFirst[afterFirst.length - 1]}" (it was "${lastBefore}") -> the new rule was not put in front`);
   }
-  if (afterFirst[0] !== before[0]) {
-    hits.push(`the 1st row changed after adding: it became "${afterFirst[0]}" (it was "${before[0]}") -> the new rule was put in front`);
+  if (afterFirst[0] === before[0]) {
+    hits.push(`the 1st row did not change after adding ("${before[0]}") -> the new rule was not put in front`);
   }
-  if (afterFirst.slice(0, expectedDefaultCount).join('|') !== before.join('|')) {
-    hits.push(`the existing rules were reordered: [${before.join(' | ')}] -> [${afterFirst.join(' | ')}]`);
+  if (afterFirst.slice(1).join('|') !== before.join('|')) {
+    hits.push(`the existing rules did not shift down keeping their order: [${before.join(' | ')}] -> [${afterFirst.slice(1).join(' | ')}]`);
   }
-  const firstNew = afterFirst[afterFirst.length - 1];
+  const firstNew = afterFirst[0];
 
-  // 第 2 次新增：新加的那条仍然在最后
+  // 第 2 次新增：新加的那条仍然在第一行，上一次那条挪到第二行
   addBtn.dispatch('click', { preventDefault() {} });
   await flush();
   const afterSecond = rowNames();
@@ -519,17 +518,18 @@ async function inspectAddRuleGoesLast(productSource, label, expectedDefaultCount
     hits.push(`after the 2nd add the list should have ${expectedDefaultCount + 2} rows, got ${afterSecond.length}`);
     return hits;
   }
-  if (afterSecond[0] !== before[0]) {
-    hits.push(`the 1st row changed again after the 2nd add: it became "${afterSecond[0]}"`);
+  // 真的多画了一行（不是原地替换），所以只要行数对、第一行是刚加的那条、第二行是上一次那条即可
+  if (afterSecond[0] === before[0]) {
+    hits.push(`after the 2nd add the 1st row is "${afterSecond[0]}" -> the new rule did not take the first row`);
   }
-  if (afterSecond[afterSecond.length - 2] !== firstNew) {
-    hits.push('the rule added 1st is no longer second-to-last after adding another one');
+  if (afterSecond[1] !== firstNew) {
+    hits.push(`after the 2nd add the 2nd row should still be the rule added 1st ("${firstNew}"), got "${afterSecond[1]}"`);
   }
-  if (afterSecond.slice(0, expectedDefaultCount).join('|') !== before.join('|')) {
-    hits.push(`the existing rules were reordered by the 2nd add: [${afterSecond.join(' | ')}]`);
+  if (afterSecond.slice(2).join('|') !== before.join('|')) {
+    hits.push(`the existing rules did not shift down again keeping their order: [${afterSecond.slice(2).join(' | ')}]`);
   }
 
-  // 列表顺序就是求值顺序：送给保存接口的规则表必须与行顺序一致，新规则仍在最后
+  // 列表顺序就是求值顺序：送给保存接口的规则表必须与行顺序一致，新规则仍在第一行
   const saveBtn = byId(run.elements, 'rule-save');
   if (saveBtn) {
     saveBtn.dispatch('click', { preventDefault() {} });
@@ -542,8 +542,8 @@ async function inspectAddRuleGoesLast(productSource, label, expectedDefaultCount
       if (savedNames.join('|') !== afterSecond.join('|')) {
         hits.push(`what gets saved does not follow the row order: [${savedNames.join(' | ')}] vs [${afterSecond.join(' | ')}]`);
       }
-      if (savedNames[savedNames.length - 1] !== firstNew) {
-        hits.push('the new rule is not last in the rules table handed to save');
+      if (savedNames[0] !== firstNew) {
+        hits.push('the new rule is not first in the rules table handed to save');
       }
     }
   }
@@ -637,9 +637,9 @@ async function inspectAddRuleGoesLast(productSource, label, expectedDefaultCount
       await flush();
       eq(rows().length, before + 1, '点新增规则之后的规则行数');
 
-      // 给这一行填：规则名 = 发票，关键词 = 发票
+      // 给这一行填：规则名 = 发票，关键词 = 发票。新增的规则在第一行，所以这一行就是 rows()[0]
       const rowList = rows();
-      const newRow = rowList[rowList.length - 1];
+      const newRow = rowList[0];
       const nameField = findByClass(newRow, 'rule-name')[0];
       const keyField = findByClass(newRow, 'rule-keywords')[0];
       ok(nameField, '新增的行里没有规则名输入框');
@@ -670,7 +670,7 @@ async function inspectAddRuleGoesLast(productSource, label, expectedDefaultCount
       const hit = sent.find((r) => Array.isArray(r.condition && r.condition.keywords) && r.condition.keywords.indexOf('发票') >= 0);
       ok(hit, `传给预览的规则表里没有刚配的关键词规则：${JSON.stringify(sent.map((r) => r.name))}`);
       eq(hit.name, '发票', '新规则的规则名');
-      ok(sent.indexOf(hit) === sent.length - 1, '新规则应当排在最后（先命中的在上）');
+      ok(sent.indexOf(hit) === 0, '新规则应当排在第一行（列表顺序 = 求值顺序，最优先命中）');
       // 界面上还要能看出「预览用的是当前规则」
       const warn = String((byId(live.elements, 'preview-warning') || {}).textContent || '');
       const summary = String((byId(live.elements, 'preview-summary') || {}).textContent || '');
@@ -710,15 +710,15 @@ async function inspectAddRuleGoesLast(productSource, label, expectedDefaultCount
       eq(rows().length, 5, '恢复默认之后的规则行数');
     });
 
-    /* ---------- 四、新增规则必须排在末尾（列表顺序 = 求值顺序） ---------- */
-    await check('新增规则排在末尾：默认 5 条时连点两次「新增规则」，新规则都在最后一行', async () => {
-      const hits = await inspectAddRuleGoesLast(rendererJs, 'current-renderer.js', 5);
-      ok(hits.length === 0, `新增规则没排在末尾：${hits.join(' | ')}`);
-      // 反证：探针必须是活的 —— 拿「新规则插到首行」的产物喂进去必须判失败
-      const deadHits = await inspectAddRuleGoesLast(FRONT_INSERT_PRODUCT, 'front-insert-product.js', 5);
-      ok(deadHits.length > 0, '插到首行的产物被说 OK —— 这条断言是死的');
-      log(`      反证（插到首行的产物被抓到）：${deadHits.slice(0, 3).join(' | ')}`);
-      // 真产物里现存规则的顺序也不许被动过（新增只追加，不重排）
+    /* ---------- 四、新增规则必须排在第一行（列表顺序 = 求值顺序） ---------- */
+    await check('新增规则排在第一行：默认 5 条时连点两次「新增规则」，新规则都在第一行、原来五条整体后移一位', async () => {
+      const hits = await inspectAddRuleGoesFirst(rendererJs, 'current-renderer.js', 5);
+      ok(hits.length === 0, `新增规则没排在第一行：${hits.join(' | ')}`);
+      // 反证：探针必须是活的 —— 拿「新规则追加到末尾」的产物喂进去必须判失败
+      const deadHits = await inspectAddRuleGoesFirst(APPEND_PRODUCT, 'append-product.js', 5);
+      ok(deadHits.length > 0, '追加到末尾的产物被说 OK —— 这条断言是死的');
+      log(`      反证（追加到末尾的产物被抓到）：${deadHits.slice(0, 3).join(' | ')}`);
+      // 真产物里现存规则的顺序也不许被动过（新增只插入一行，不重排）
       const names = rows().map((row) => {
         const field = findByClass(row, 'rule-name')[0];
         return field ? String(field.value) : '';
@@ -738,8 +738,8 @@ async function inspectAddRuleGoesLast(productSource, label, expectedDefaultCount
       ok(halfHits.length > 0, '没有规则列表容器的产物被说 OK —— 探针是死的');
 
       // 「不把规则传给预览」的产物：全部元素都在、也画得出规则行，就是预览少传了规则 → 必须判失败
-      const noRulesToPreview = FRONT_INSERT_PRODUCT.split('api.preview(selectedFiles, outputDir, currentRules)').join('api.preview(selectedFiles, outputDir)');
-      ok(noRulesToPreview !== FRONT_INSERT_PRODUCT, '没能造出「不把规则传给预览」的产物样本');
+      const noRulesToPreview = APPEND_PRODUCT.split('api.preview(selectedFiles, outputDir, currentRules)').join('api.preview(selectedFiles, outputDir)');
+      ok(noRulesToPreview !== APPEND_PRODUCT, '没能造出「不把规则传给预览」的产物样本');
       const noRulesHits = await inspectRuleEditor(noRulesToPreview, 'rule-editor-without-rules-arg.js');
       ok(noRulesHits.length > 0, '不把规则传给预览的产物被说 OK —— 探针是死的');
       log(`      不把规则传给预览的产物被抓到：${noRulesHits.slice(0, 3).join(' | ')}`);
