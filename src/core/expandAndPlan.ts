@@ -572,15 +572,14 @@ export function buildPlan(options: PlanOptions): PlanResult {
       }
 
       // 散文件（只在这一层、只有顶层源文件夹走这条路）：按顺序判定，每一步都记一句人话原因。
-      //  1. 这一层有**同名子文件夹**（名字 = 这个文件自己的名字去掉扩展名，大小写不敏感，只比同一层）→ 并进去；
-      //  2. 被同名**文件**占位 → 不许覆盖它，退回第 3 步并说明；
+      //  1. 这一层有**同名子文件夹**（名字 = 这个文件自己的名字去掉扩展名，大小写不敏感，只比同一层）
+      //     → 并进去（**名字相同就算一回事**，不看那个子文件夹里装的是什么 —— 用户拍板）；
+      //  2. 被同名**文件**占位（文件自己的名字，或规则算出的分类夹名被一个文件占着）→ 不许覆盖它，
+      //     退回第 3 步并说明；
       //  3. 按规则新建分类夹。
-      // 第 1 步有一条**防误伤**的硬保护：如果那个同名子文件夹里已经有文件、但**一个**属于
-      // 本文件该去的规则分类夹的文件都没有（说明它根本不是装这类东西的），就不硬塞，
-      // 退回第 3 步并说明原因 —— 免得为了「同名」把既有的目录结构打乱。
+      // 明确不做的事：**不推断**「那个同名子文件夹里是不是已经有同类文件才决定并」——那属于被排除的范围。
       const stem = splitFileName(file.name).stem;
-      const matched = classifyWithMeta(rules, file.fullPath, file.name);
-      const categoryName = matched.folder;
+      const categoryName = classifyWithMeta(rules, file.fullPath, file.name).folder;
       const sameNameDir = joinedPath(outputDirPath, stem);
       let mergeInto: PlannedFolder | null =
         planned.subfolders.find((s) => s.outputName.toLowerCase() === stem.toLowerCase()) ?? null;
@@ -589,7 +588,7 @@ export function buildPlan(options: PlanOptions): PlanResult {
         : '';
 
       if (mergeInto) {
-        // 保护一：同名位置上其实是个**文件**（不许覆盖）→ 退回按规则建分类夹
+        // 被同名「文件」占位（不许覆盖）→ 退回按规则建分类夹
         try {
           const st = fssync.statSync(sameNameDir);
           if (!st.isDirectory()) {
@@ -598,24 +597,6 @@ export function buildPlan(options: PlanOptions): PlanResult {
           }
         } catch {
           /* 目录还不存在，属正常 */
-        }
-      }
-
-      if (mergeInto) {
-        // 保护二（防误伤，硬保护）：同名子文件夹里**已经有文件**、但这些文件里**一个**属于
-        // 本文件该去的规则分类夹的都没有（例如 照片\ 里只有 a.mp4，却想把 照片.jpg 塞进去）→
-        // 不硬塞，退回按规则建分类夹并说明；
-        // 同名子文件夹是**空的**、或者里面本来就有同一类的文件（例如 发票\ 里已有 老发票.pdf）
-        // → 照常并进去，不打乱原有结构。
-        const inside = allKeptOf(mergeInto);
-        const insideCategories = inside.map((f) => classifyWithMeta(rules, f.fullPath, f.name).folder);
-        if (inside.length > 0 && !insideCategories.includes(categoryName)) {
-          mergeReason =
-            `这一层有和它同名的子文件夹 ${mergeInto.outputName}\\，但它里面只有 ` +
-            `${inside.map((f) => f.name).join('、')}（属于「${Array.from(new Set(insideCategories)).join('、')}」），` +
-            `一个「${categoryName}」类的文件都没有、根本不是装这类东西的，所以没有硬塞进去；` +
-            `按当前规则新建分类夹 ${categoryName}\\`;
-          mergeInto = null;
         }
       }
 

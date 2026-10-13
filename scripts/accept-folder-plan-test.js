@@ -256,42 +256,45 @@ async function main() {
       console.log('      发票.pdf 并进 下载\\发票\\（与老发票.pdf 同处），没有另建分类夹');
     });
 
-    /* ---------- 五之二、防误伤硬保护（逐条写清走了哪条路） ---------- */
-    await check('防误伤硬保护：同名子文件夹里没有同类文件时不硬塞，按规则建分类夹并给出人话原因', () => {
+    /* ---------- 五之二、名字相同就算一回事（不受「里面装的是什么」影响） ---------- */
+    await check('名字相同就算一回事：同名子文件夹里装的是什么都不影响并进去（用户拍板的口径）', () => {
       /**
-       * 控制台给的硬保护：同名子文件夹里**已经有文件**、但这些文件里一个属于「本文件该去的规则分类夹」
-       * 的都没有（说明它不是装这类东西的）→ 不并进去，退回规则建分类夹并说明。
-       * 下面两条例子里，子文件夹里都只有别的类别的东西，所以都走「退回规则」这一条路。
+       * 用户拍板：「还是并进去（名字相同就算一回事）」。所以这里明确断言：
+       *  **只看名字**，不看那个同名子文件夹里装的是什么类别的东西，也不做任何推断。
+       * 三种「同名子文件夹里装的东西都不一样」的情形各断言一次：
+       *  - 风景\ 里是别的类别的文本（note.txt，02_文档）；
+       *  - 影集\ 里是别的类别的音视频（a.mp4，03_音视频）；
+       *  - 照片\ 里本来就有同类图片（图1.png，01_图片）。
+       * 三者都必须并进去，且原因里都是「同名 → 并进它」。
        */
       const 风景 = byName('风景.jpg');
-      eq(风景.placement, 'classify', '风景.jpg：风景\\ 里只有 note.txt（02_文档），没有 01_图片 类文件 → 应退回规则');
-      eq(风景.category, core.classifyFile(path.join('下载', '风景.jpg')), '风景.jpg 的分类夹（规则现算）');
-      eq(relOut(path.join(风景.targetDir, 风景.name)), `下载\\${风景.category}\\风景.jpg`, '风景.jpg 的输出路径');
+      eq(风景.placement, 'merge', '风景.jpg：风景\\ 里只有 note.txt（别的类别），但名字相同 → 照样并进去');
+      eq(风景.category, '风景', '风景.jpg 并入的子文件夹名');
+      eq(relOut(path.join(风景.targetDir, 风景.name)), '下载\\风景\\风景.jpg', '风景.jpg 的输出路径');
       ok(
-        风景.mergeReason && /同名的子文件夹 风景/.test(风景.mergeReason) && /没有硬塞进去/.test(风景.mergeReason),
-        `风景.jpg 应当说清「没有硬塞进去」及原因：${风景.mergeReason}`,
+        风景.mergeReason && /按文件名「风景」比对/.test(风景.mergeReason) && /并进它/.test(风景.mergeReason),
+        `风景.jpg 应当说清「同名 → 并进它」：${风景.mergeReason}`,
       );
-      // 没有打乱原有结构：风景\ 里原来那个 note.txt 还在原地
+      // 并进去不许把原来那个文件挤走或改名
       const noteKeep = outcome.plan.files.find((f) => f.name === 'note.txt');
       eq(noteKeep.placement, 'keep', '风景\\note.txt 应当仍然原样保留');
       eq(relOut(path.join(noteKeep.targetDir, noteKeep.name)), '下载\\风景\\note.txt', '风景\\note.txt 的位置没被动过');
-
-      const 照片 = byName('照片.jpg');
-      eq(照片.placement, 'merge', '照片.jpg：照片\\ 里本来就有同一类的图（图1.png）→ 照常并进去，不硬塞才怪');
-      eq(照片.category, '照片', '照片.jpg 并入的子文件夹名');
-      eq(relOut(path.join(照片.targetDir, 照片.name)), '下载\\照片\\照片.jpg', '照片.jpg 的输出路径');
+      eq(noteKeep.targetDir, 风景.targetDir, '风景.jpg 与 note.txt 都在 下载\\风景\\ 里');
 
       const 影集 = byName('影集.jpg');
-      eq(影集.placement, 'classify', '影集.jpg：影集\\ 里只有 a.mp4（03_音视频），没有 01_图片 类文件 → 应退回规则');
-      eq(影集.category, core.classifyFile(path.join('下载', '影集.jpg')), '影集.jpg 的分类夹（规则现算）');
-      eq(relOut(path.join(影集.targetDir, 影集.name)), `下载\\${影集.category}\\影集.jpg`, '影集.jpg 的输出路径');
-      ok(
-        影集.mergeReason && /同名的子文件夹 影集/.test(影集.mergeReason) && /没有硬塞进去/.test(影集.mergeReason),
-        `影集.jpg 应当说清「没有硬塞进去」及原因：${影集.mergeReason}`,
-      );
+      eq(影集.placement, 'merge', '影集.jpg：影集\\ 里只有 a.mp4（别的类别），但名字相同 → 照样并进去');
+      eq(影集.category, '影集', '影集.jpg 并入的子文件夹名');
+      eq(relOut(path.join(影集.targetDir, 影集.name)), '下载\\影集\\影集.jpg', '影集.jpg 的输出路径');
+      ok(影集.mergeReason && /按文件名「影集」比对/.test(影集.mergeReason), `影集.jpg 应当说清同名比对：${影集.mergeReason}`);
       const mp4Keep = outcome.plan.files.find((f) => f.name === 'a.mp4');
       eq(mp4Keep.placement, 'keep', '影集\\a.mp4 应当仍然原样保留');
       eq(relOut(path.join(mp4Keep.targetDir, mp4Keep.name)), '下载\\影集\\a.mp4', '影集\\a.mp4 的位置没被动过');
+
+      const 照片 = byName('照片.jpg');
+      eq(照片.placement, 'merge', '照片.jpg：照片\\ 里本来就有同一类的图 → 同样并进去');
+      eq(照片.category, '照片', '照片.jpg 并入的子文件夹名');
+      eq(relOut(path.join(照片.targetDir, 照片.name)), '下载\\照片\\照片.jpg', '照片.jpg 的输出路径');
+      console.log(`      风景.jpg → ${风景.mergeReason}`);
       console.log(`      影集.jpg → ${影集.mergeReason}`);
     });
 
@@ -522,8 +525,8 @@ async function main() {
       const preview = core.buildPreviewTree({ files: [], roots, outputDir: previewOut, rules: null });
       ok(preview && preview.ok === true, `预览失败：${preview && preview.message}`);
       eq(preview.tree.total, Object.keys(FIXTURE).length, '预览里的文件总数');
-      eq(preview.tree.classifyCount, 6, '预览里「按规则新建分类夹」的个数（散1、散2、d1、占位那个 01_图片、风景、影集）');
-      eq(preview.tree.mergeCount, 3, '预览里「并进同名子文件夹」的个数（发票.pdf、照片.jpg、photos.jpg）');
+      eq(preview.tree.classifyCount, 4, '预览里「按规则新建分类夹」的个数（散1、散2、d1、占位那个 01_图片）');
+      eq(preview.tree.mergeCount, 5, '预览里「并进同名子文件夹」的个数（发票.pdf、风景.jpg、照片.jpg、影集.jpg、photos.jpg）');
       eq(preview.tree.keepCount, 8, '预览里「原样保留」的个数（子文件夹里的）');
       eq(preview.tree.keepHint, core.FOLDER_KEEP_HINT, '预览里那句人话必须来自同一个来源');
       eq(
@@ -543,7 +546,7 @@ async function main() {
         (发票子夹.mergedIn || []).some((f) => f.name === '发票.pdf'),
         `预览里「发票」子文件夹没有标出并进来的散文件：${JSON.stringify(发票子夹.files.map((f) => f.name))}`,
       );
-      eq(root下载.self.mergedCount, 2, '「下载」这一份里并进子文件夹的散文件个数（发票.pdf、照片.jpg）');
+      eq(root下载.self.mergedCount, 4, '「下载」这一份里并进子文件夹的散文件个数（发票.pdf、风景.jpg、照片.jpg、影集.jpg）');
 
       const diskAfter = countTree(srcRoot);
       eq(diskAfter.files, diskBefore.files, '预览过程中原目录里的文件数');
