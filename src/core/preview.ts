@@ -90,7 +90,13 @@ export interface PreviewSourceFolder {
   renamed: boolean;
   /** 这一层根下散文件按规则**新建**的分类夹（空分类不列） */
   categories: PreviewFolder[];
-  /** 原样保留的子树（空文件夹不列；里面的散文件已并进来） */
+  /** 沉进这一份的散文件（只有子文件夹那几层才有；顶层为空） */
+  mergedIn: PreviewFile[];
+  /** 这些沉进来的散文件各自沉了几层（与 `mergedIn` 一一对应） */
+  sunkDepth: number[];
+  /** 它们各自的人话原因（与 `mergedIn` 一一对应） */
+  sunkReasons: string[];
+  /** 原样保留的子树（空文件夹不列；里面的散文件已沉进来） */
   subfolders: PreviewSubFolder[];
 }
 
@@ -104,10 +110,14 @@ export interface PreviewSubFolder {
   outputPath: string;
   /** 这个目录（含下面整棵子树）有几个文件 */
   count: number;
-  /** 直接躺在这个目录里的文件（含并进来的散文件） */
+  /** 直接躺在这个目录里的文件（含沉进来的散文件） */
   files: PreviewFile[];
-  /** 其中是「散文件并进来」的那几个（用来在界面上说清「并进同名子文件夹」） */
+  /** 其中是「散文件沉进来」的那几个（界面上要说清「它沉到了这一层、沉了几层」） */
   mergedIn: PreviewFile[];
+  /** 这些沉进来的散文件各自沉了几层（与 `mergedIn` 一一对应） */
+  sunkDepth: number[];
+  /** 它们各自的人话原因（与 `mergedIn` 一一对应） */
+  sunkReasons: string[];
   /** 它下面的子目录 */
   children: PreviewSubFolder[];
 }
@@ -369,6 +379,12 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
         count: g.files.length,
         files: g.files.map((f) => previewItemOf(f.fullPath, g.category)),
       })),
+      mergedIn: planned.mergedInto.map((f) => previewItemOf(f.fullPath, '')),
+      // 沉了几层 = 它停下的那一层的层数 − 它原来所在那一层的层数
+      sunkDepth: planned.mergedInto.map((f) =>
+        Math.max(0, planned.origin.chain.length - (f.originChain?.length ?? planned.origin.chain.length)),
+      ),
+      sunkReasons: planned.mergedInto.map((f) => f.mergeReason ?? ''),
       subfolders: planned.subfolders.map((sub) => makeSubFolder(sub)),
     });
 
@@ -377,9 +393,14 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
       sourcePath: sourcePathOf(sub.origin),
       outputPath: sub.outputDir,
       count: sub.totalFileCount,
-      // 这一层原样保留的文件 + 并进来的散文件（子目录里的留在各自节点上）
+      // 这一层原样保留的文件 + 沉进来的散文件（子目录里的留在各自节点上）
       files: sub.keptFiles.concat(sub.mergedInto).map((f) => previewItemOf(f.fullPath, '')),
       mergedIn: sub.mergedInto.map((f) => previewItemOf(f.fullPath, '')),
+      // 沉了几层 = 它停下的那一层的层数 − 它原来所在那一层的层数
+      sunkDepth: sub.mergedInto.map((f) =>
+        Math.max(0, sub.origin.chain.length - (f.originChain?.length ?? sub.origin.chain.length)),
+      ),
+      sunkReasons: sub.mergedInto.map((f) => f.mergeReason ?? ''),
       children: sub.subfolders.map((c) => makeSubFolder(c)),
     });
 

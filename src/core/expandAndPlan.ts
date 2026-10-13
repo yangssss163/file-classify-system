@@ -44,7 +44,7 @@ export const MAX_SCAN_DEPTH = 20;
 
 /** 界面上那句人话（预览里必须明确写出来，也就是用户看到的那段说明）。只有这一个来源，不许在别处再写一份。 */
 export const FOLDER_KEEP_HINT =
-  '子文件夹里的文件按原样保留（连层级一起搬）；散在源文件夹自己那层根下的文件，若这一层有和它同名的子文件夹（按文件名去扩展名比对）就并进去，否则按当前规则新建分类夹。';
+  '子文件夹里的文件按原样保留（连层级一起搬）；散在某一层根下的文件，若那一层有和它同名的子文件夹（按文件名去扩展名比对）就沉进去，进去了再按同一规矩往下看，直到没有同名的可沉；一次都没沉成的才按当前规则新建分类夹。';
 
 /* ------------------------------------------------------------------ *
  * 类型
@@ -125,14 +125,17 @@ export interface PlannedFile {
   targetDir: string;
   /**
    * 这个文件是怎么安排的：
-   *  - `keep`：子文件夹里的文件 → 按原样保留相对路径，不分类；
-   *  - `classify`：源文件夹自己那层根下的散文件 → 进分类夹（`category` 是分类夹名）；
-   *  - `merge`：源文件夹自己那层根下的散文件 → **并进已有的同名子文件夹**（`category` 是那个子文件夹名）。
+   *  - `keep`：本来就在子文件夹里、且没得可沉 → 按原样保留相对路径；
+   *  - `classify`：某一层根下的文件，没得可沉（或同名位置被文件占着）→ 按规则进分类夹（`category` 是分类夹名）；
+   *  - `merge`：某一层根下的文件**沉进了同名的子文件夹**，一直沉到没有同名的可沉为止 → 留在那一层
+   *    （`category` 是最后停下的那一层的名字）。
    */
   placement: 'keep' | 'classify' | 'merge';
-  /** 分类夹名（`classify`）或并入的子文件夹名（`merge`）；`keep` 时为 null */
+  /** 分类夹名（`classify`）或最后停下的那一层子文件夹名（`merge`）；`keep` 时为 null */
   category: string | null;
-  /** 并入/分类时的人话说明（给人看）；原样保留时为 null */
+  /** 这个文件原来在**源的哪一层**（相对拖入点）；界面据此算「沉了几层」 */
+  originChain: string[];
+  /** 沉/分类/占位的人话说明（给人看）；原样保留时为 null */
   mergeReason: string | null;
   /** 是否因同名冲突换过名 */
   renamed: boolean;
@@ -549,11 +552,99 @@ export function buildPlan(options: PlanOptions): PlanResult {
       planned.subfolders.push(processNode(child, picked.name, childDir, false, picked.renamed));
     }
 
-    // ② 这一层根下的文件：
-    //    - 顶层源文件夹的散文件：**先并进同名子文件夹**，没有同名子文件夹才按规则建分类夹；
-    //    - 子文件夹里的文件：**原样保留**，直接待在 outputDirPath 这一层。
+    // ② 这一层根下的文件：**同一套规矩**（不给谁开特例）。规矩 = 「同名就往下沉，沉到底」：
+    //    这一层若有和它同名的子文件夹（文件自己的名字去扩展名、大小写不敏感、只比同一层）→ 沉进去，
+    //    进去以后再按同一规矩往下看，直到那一层没有同名的可沉 → 就停在那一层（不再按规则另建分类夹）。
+    //    一次都没沉成（连第一层都没有同名的）→ 按规则新建分类夹。
+    //    明细见 `sinkOne()`。
     for (const file of node.looseFiles) {
-      if (!classifyHere) {
+      sinkOne(node, file, planned, outputDirPath, /* allowClassify */ classifyHere);
+    }
+    planned.categories.sort((a, b) => a.category.localeCompare(b.category));
+
+    planned.totalFileCount = countFilesOf(planned);
+    return planned;
+  };
+
+  /**
+   * 把一个「某一层根下的文件」按规矩放下去：**同名就往下沉，沉到底**。
+   *
+   * 停下来的三种情形：
+   *  - 抵达最深处的那个同名子文件夹里、且它下面没有同名的可沉 → **留在那一层**（placement = 'merge'，不按规则另建分类夹）；
+   *  - 一次都没沉成（`sank === 0`）→ 按规则新建分类夹（placement = 'classify'）；
+   *  - 沉到的那一层被一个**同名文件**占着 → 不动那个文件，退回规则建分类夹并说明（沿用既有保护）。
+   *
+   * 下沉只在**同一个源文件夹树内**往下走（用节点自己的子树找同名子文件夹），绝不会跨源文件夹。
+   * 深度上限沿用 `MAX_SCAN_DEPTH`：到顶就停下并在原因里说明。
+   *
+   * @param allowClassify 只对**顶层源文件夹那层**的散文件为 true（它们才是「按规则分类」的对象）；
+   *   子文件夹里的文件同样走「同名就下沉」，但一次没沉成就**留在原地**（不按规则另建分类夹）。
+   */
+  const sinkOne = (
+    node: ScanNode,
+    file: TrackedFile,
+    top: PlannedFolder,
+    outputDirPath: string,
+    allowClassify: boolean,
+  ): void => {
+    const stem = splitFileName(file.name).stem;
+    const categoryName = classifyWithMeta(rules, file.fullPath, file.name).folder;
+    const depthCap = MAX_SCAN_DEPTH;
+
+    interface SinkStep {
+      name: string;
+      /** 这一层是「同名」沉下去的，还是「只有一条路」顺下去的 */
+      viaSameName?: boolean;
+    }
+    const steps: SinkStep[] = [];
+    let curNode: ScanNode = node;
+    let curOut = outputDirPath;
+    let guard = 0;
+
+    /** 在计划树里按输出名找这一层对应的那一份（用于登记并进来的文件）。 */
+    const plannedAt = (chain: string[]): PlannedFolder | null => {
+      let cursor: PlannedFolder | null = top;
+      for (const seg of chain) {
+        if (!cursor) return null;
+        cursor = cursor.subfolders.find((s) => s.outputName === seg) ?? null;
+      }
+      return cursor;
+    };
+
+    for (;;) {
+      if (++guard > depthCap + 2) break; // 兜底：绝不可能无限循环
+      // 这一层有和它同名的子文件夹吗？（只比同一层、大小写不敏感）
+      const children: ScanNode[] = curNode.children;
+      const hit = children.find((c) => {
+        const name = c.origin.chain[c.origin.chain.length - 1];
+        return name.toLowerCase() === stem.toLowerCase();
+      });
+      if (process.env.DSH_DEBUG_SINK) {
+        console.log(
+          `[dbg-loop] guard=${guard} stem=${stem} curNode=${JSON.stringify(curNode.origin.chain)} kids=${JSON.stringify(
+            children.map((k) => k.origin.chain.join('/')),
+          )} hit=${!!hit}`,
+        );
+      }
+      if (!hit) break; // 这一层没有同名的可沉 → 停下来
+      const chain: string[] = hit.origin.chain;
+      if (chain.length > depthCap) {
+        break; // 已经到深度上限，停在这里并在下面说明
+      }
+      const plannedHit = plannedAt(chain);
+      if (!plannedHit) break;
+      steps.push({ name: plannedHit.outputName });
+      curNode = hit;
+      curOut = plannedHit.outputDir;
+    }
+
+    const sank = steps.length;
+    const pathText = steps.map((s) => s.name + '\\').join('');
+    const deepestDir = curOut;
+
+    if (sank === 0) {
+      if (!allowClassify) {
+        // 子文件夹里的文件，没得可沉 → 留在原地（不按规则另建分类夹）
         const placed = placeName(outputDirPath, file.name);
         const entry: PlannedFile = {
           fullPath: file.fullPath,
@@ -562,83 +653,30 @@ export function buildPlan(options: PlanOptions): PlanResult {
           targetDir: outputDirPath,
           placement: 'keep',
           category: null,
+          originChain: node.origin.chain.slice(),
           mergeReason: null,
           renamed: placed.renamed,
         };
         files.push(entry);
-        planned.keptFiles.push(entry);
-        planned.keptFileCount++;
-        continue;
+        top.keptFiles.push(entry);
+        top.keptFileCount++;
+        return;
       }
-
-      // 散文件（只在这一层、只有顶层源文件夹走这条路）：按顺序判定，每一步都记一句人话原因。
-      //  1. 这一层有**同名子文件夹**（名字 = 这个文件自己的名字去掉扩展名，大小写不敏感，只比同一层）
-      //     → 并进去（**名字相同就算一回事**，不看那个子文件夹里装的是什么 —— 用户拍板）；
-      //  2. 被同名**文件**占位（文件自己的名字，或规则算出的分类夹名被一个文件占着）→ 不许覆盖它，
-      //     退回第 3 步并说明；
-      //  3. 按规则新建分类夹。
-      // 明确不做的事：**不推断**「那个同名子文件夹里是不是已经有同类文件才决定并」——那属于被排除的范围。
-      const stem = splitFileName(file.name).stem;
-      const categoryName = classifyWithMeta(rules, file.fullPath, file.name).folder;
-      const sameNameDir = joinedPath(outputDirPath, stem);
-      let mergeInto: PlannedFolder | null =
-        planned.subfolders.find((s) => s.outputName.toLowerCase() === stem.toLowerCase()) ?? null;
-      let mergeReason = mergeInto
-        ? `这一层有和它同名的子文件夹 ${mergeInto.outputName}\\（按文件名「${stem}」比对），散文件并进它，不另建分类夹`
-        : '';
-
-      if (mergeInto) {
-        // 被同名「文件」占位（不许覆盖）→ 退回按规则建分类夹
+      // 顶层源文件夹的散文件，没得可沉 → 按规则新建分类夹（既有行为）
+      let reason = `这一层没有和它同名的子文件夹，没得可沉；按规则算出来是「${categoryName}」，新建分类夹`;
+      // 同名位置被一个**文件**占着（或规则分类夹名被一个文件占着）→ 说明一下，不许覆盖它
+      for (const name of [stem, categoryName]) {
+        if (name.length === 0) continue;
         try {
-          const st = fssync.statSync(sameNameDir);
+          const st = fssync.statSync(joinedPath(node.dirPath, name));
           if (!st.isDirectory()) {
-            mergeReason = `这一层有个同名的「文件」占着 ${stem} 这个名字，没有动它；按规则新建分类夹`;
-            mergeInto = null;
+            reason = `这一层有个同名的「文件」占着 ${name} 这个名字，没有动它；按规则新建分类夹`;
+            break;
           }
         } catch {
-          /* 目录还不存在，属正常 */
+          /* 没有这个东西，属正常 */
         }
       }
-
-      if (!mergeInto && mergeReason.length === 0) {
-        // 没找到同名子文件夹：再确认一下「同名位置上是不是被一个**文件**占着」。两种都算：
-        //  a) 这一层有个文件，名字正好等于本文件的名字（去掉扩展名）；
-        //  b) 这一层有个文件，名字正好等于**规则算出来的分类夹名**（例如有个文件叫 01_图片）。
-        const candidates = [stem, categoryName];
-        for (const name of candidates) {
-          if (name.length === 0) continue;
-          try {
-            const st = fssync.statSync(joinedPath(node.dirPath, name));
-            if (!st.isDirectory()) {
-              mergeReason = `这一层有个同名的「文件」占着 ${name} 这个名字，没有动它；按规则新建分类夹`;
-              break;
-            }
-          } catch {
-            /* 没有这个东西，属正常 */
-          }
-        }
-      }
-
-      if (mergeInto) {
-        const placed = placeName(mergeInto.outputDir, file.name);
-        const entry: PlannedFile = {
-          fullPath: file.fullPath,
-          name: placed.name,
-          origin: node.origin,
-          targetDir: mergeInto.outputDir,
-          placement: 'merge',
-          category: mergeInto.outputName,
-          mergeReason,
-          renamed: placed.renamed,
-        };
-        files.push(entry);
-        mergeInto.mergedInto.push(entry);
-        mergeInto.keptFileCount++;
-        planned.looseFileCount++;
-        planned.mergedCount++;
-        continue;
-      }
-
       const categoryDir = joinedPath(outputDirPath, categoryName);
       const placed = placeName(categoryDir, file.name);
       const entry: PlannedFile = {
@@ -648,26 +686,107 @@ export function buildPlan(options: PlanOptions): PlanResult {
         targetDir: categoryDir,
         placement: 'classify',
         category: categoryName,
-        mergeReason:
-          mergeReason.length > 0
-            ? mergeReason
-            : `这一层没有同名的子文件夹，按规则算出来是「${categoryName}」，新建分类夹`,
+        originChain: node.origin.chain.slice(),
+        mergeReason: reason,
         renamed: placed.renamed,
       };
       files.push(entry);
-      planned.looseFileCount++;
-      planned.classifiedCount++;
-      let bucket = planned.categories.find((c) => c.category === categoryName);
+      top.looseFileCount++;
+      top.classifiedCount++;
+      let bucket = top.categories.find((c) => c.category === categoryName);
       if (!bucket) {
         bucket = { category: categoryName, files: [] };
-        planned.categories.push(bucket);
+        top.categories.push(bucket);
       }
       bucket.files.push(entry);
+      return;
     }
-    planned.categories.sort((a, b) => a.category.localeCompare(b.category));
 
-    planned.totalFileCount = countFilesOf(planned);
-    return planned;
+    // 沉过之后：分两种情况
+    //  · 最深处那层已经有**同名文件** → 沿用既有换名规则（「原名 (1).后缀」），**绝不覆盖**；
+    //  · 出发那一层就有个同名的**文件**占着（例如 撞名.pdf 与文件「撞名」同处一层）→
+    //    不动那个文件，退回规则建分类夹并说明。
+    const deepestPlanned = plannedAt(curNode.origin.chain);
+    const deepestHasSameFile = deepestPlanned
+      ? deepestPlanned.keptFiles.some((f) => f.name.toLowerCase() === file.name.toLowerCase())
+      : false;
+    const startHasSameFile = (() => {
+      try {
+        const st = fssync.statSync(joinedPath(node.dirPath, stem));
+        return !st.isDirectory();
+      } catch {
+        return false;
+      }
+    })();
+    if (deepestHasSameFile) {
+      const placed = placeName(deepestDir, file.name);
+      const entry: PlannedFile = {
+        fullPath: file.fullPath,
+        name: placed.name,
+        origin: node.origin,
+        targetDir: deepestDir,
+        placement: 'merge',
+        category: steps[steps.length - 1].name,
+        originChain: node.origin.chain.slice(),
+        mergeReason: `和这一层根下的「${steps[0].name}」同名，沉了 ${sank} 层（${pathText}）留在这里；那一层已经有同名文件，按换名规则改成「${placed.name}」，绝不覆盖`,
+        renamed: placed.renamed,
+      };
+      files.push(entry);
+      const owner = deepestPlanned ?? top;
+      owner.mergedInto.push(entry);
+      owner.keptFileCount++;
+      top.looseFileCount++;
+      top.mergedCount++;
+      return;
+    }
+    if (startHasSameFile && allowClassify) {
+      const categoryDir = joinedPath(outputDirPath, categoryName);
+      const placed = placeName(categoryDir, file.name);
+      const entry: PlannedFile = {
+        fullPath: file.fullPath,
+        name: placed.name,
+        origin: node.origin,
+        targetDir: categoryDir,
+        placement: 'classify',
+        category: categoryName,
+        originChain: node.origin.chain.slice(),
+        mergeReason: `这一层有个同名的「文件」占着 ${stem} 这个名字，没有动它；按规则新建分类夹 ${categoryName}\\`,
+        renamed: placed.renamed,
+      };
+      files.push(entry);
+      top.looseFileCount++;
+      top.classifiedCount++;
+      let bucket = top.categories.find((c) => c.category === categoryName);
+      if (!bucket) {
+        bucket = { category: categoryName, files: [] };
+        top.categories.push(bucket);
+      }
+      bucket.files.push(entry);
+      return;
+    }
+
+    // 留在最深的那一层
+    const placed = placeName(deepestDir, file.name);
+    const entry: PlannedFile = {
+      fullPath: file.fullPath,
+      name: placed.name,
+      origin: node.origin,
+      targetDir: deepestDir,
+      placement: 'merge',
+      category: steps[steps.length - 1].name,
+      originChain: node.origin.chain.slice(),
+      mergeReason:
+        `和这一层根下的「${steps[0].name}」同名，沉进去；又按同一规矩往下看${
+          sank > 1 ? `，一共沉了 ${sank} 层（${pathText}）` : ''
+        }，` + `最深处没有同名的可沉了，就留在这里（不另建分类夹）`,
+      renamed: placed.renamed,
+    };
+    files.push(entry);
+    const owner = deepestPlanned ?? top;
+    owner.mergedInto.push(entry);
+    owner.keptFileCount++;
+    top.looseFileCount++;
+    top.mergedCount++;
   };
 
   const roots: PlannedRoot[] = [];

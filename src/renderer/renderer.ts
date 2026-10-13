@@ -404,8 +404,22 @@ function subFolderBlock(sub: PreviewSubFolder, depth: number): HTMLDivElement {
   if (sub.mergedIn && sub.mergedIn.length > 0) {
     const note = document.createElement('div');
     note.className = 'source-note';
-    note.textContent = `其中 ${sub.mergedIn.length} 个是这次并进来的散文件：${sub.mergedIn.map((f) => f.name).join('、')}（这一层已有同名子文件夹，所以不另建分类夹）`;
+    // 一条一条写清「哪个文件这次沉进来、沉了几层」
+    note.textContent =
+      '这次沉进来的散文件（沉到没有同名的可沉才停在这一层）：' +
+      sub.mergedIn
+        .map((f, i) => {
+          const depth = (sub.sunkDepth || [])[i] ?? 0;
+          return `${f.name}（沉了 ${depth} 层）`;
+        })
+        .join('、');
     body.appendChild(note);
+    for (let i = 0; i < sub.mergedIn.length; i++) {
+      const why = document.createElement('div');
+      why.className = 'source-note sunk-reason';
+      why.textContent = `　· ${sub.mergedIn[i].name}：${(sub.sunkReasons || [])[i] || '和这一层同名 → 沉进来'}`;
+      body.appendChild(why);
+    }
   }
   for (const child of sub.children) body.appendChild(subFolderBlock(child, depth + 1));
   return box;

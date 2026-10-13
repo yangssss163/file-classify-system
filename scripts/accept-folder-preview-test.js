@@ -78,7 +78,7 @@ function withoutSetSourceRoots(productSource) {
  */
 function withoutMergeNote(productSource) {
   // 用一个不含模板字面量/插值的标记，免得多层转义把匹配搞坏
-  const marker = '个是这次并进来的散文件';
+  const marker = '这次沉进来的散文件';
   const at = productSource.indexOf(marker);
   if (at < 0) return productSource;
   const start = productSource.lastIndexOf('note.textContent', at);
@@ -256,6 +256,9 @@ function makeFixture(tmpRoot) {
     [path.join(srcRoot, '下载', '照片', '图1.png')]: '01_图片',
     [path.join(srcRoot, '下载', '照片', '婚纱', '纱1.jpg')]: '01_图片',
     [path.join(srcRoot, '下载', '文档', '文1.docx')]: '02_文档',
+    // 递归下沉用例：一路沉.jpg 同名 → 沉进 一路沉\，里面还有同名的 → 再沉一层
+    [path.join(srcRoot, '下载', '一路沉.jpg')]: '01_图片',
+    [path.join(srcRoot, '下载', '一路沉', '一路沉', '在里面.txt')]: '02_文档',
     [path.join(srcRoot, '另一处', '照片', '图2.png')]: '01_图片',
   };
   for (const p of Object.keys(files)) {
@@ -607,7 +610,7 @@ async function inspectFolderSupport(productSource, label, ctx) {
     } else {
       const hintText = String(hint.textContent || '');
       const WANT_HINT =
-        '子文件夹里的文件按原样保留（连层级一起搬）；散在源文件夹自己那层根下的文件，若这一层有和它同名的子文件夹（按文件名去扩展名比对）就并进去，否则按当前规则新建分类夹。';
+        '子文件夹里的文件按原样保留（连层级一起搬）；散在某一层根下的文件，若那一层有和它同名的子文件夹（按文件名去扩展名比对）就沉进去，进去了再按同一规矩往下看，直到没有同名的可沉；一次都没沉成的才按当前规则新建分类夹。';
       // 注意：这几个关键词都取自**用户看到的那句话本身**，
       // 而且不能与「有没有并入说明」那条判据的关键词（个是这次并进来的散文件）撞词。
       if (!/原样保留/.test(hintText)) hits.push(`那句说明没说「原样保留」：「${hintText}」`);
@@ -616,10 +619,18 @@ async function inspectFolderSupport(productSource, label, ctx) {
       if (hintText !== WANT_HINT) hits.push(`界面上那句说明与控制台定的措辞不一致：「${hintText}」`);
     }
 
-    // 「并进同名子文件夹」这件事必须在界面上看得见（不能只是分组好看）
-    const mergedNote = /个是这次并进来的散文件/.test(treeText);
+    // 「沉进同名子文件夹」这件事必须在界面上看得见：哪一条沉了、沉了几层
+    const mergedNote = /这次沉进来的散文件/.test(treeText);
     if (!mergedNote) {
-      hits.push('预览树里看不出「有散文件并进了同名子文件夹」（没有那行说明）');
+      hits.push('预览树里看不出「有散文件沉进了同名子文件夹」（没有那行说明）');
+    }
+    if (!/沉了 \d+ 层/.test(treeText)) {
+      hits.push('预览树里看不出散文件「沉了几层」');
+    }
+    // 递归用例：预览里要标出「一路沉.jpg（沉了 2 层）」
+    if (treeText.indexOf('一路沉.jpg') < 0) hits.push('预览树里看不到被一路沉下去的「一路沉.jpg」');
+    if (!/一路沉\.jpg（沉了 2 层）/.test(treeText)) {
+      hits.push('预览树里没有标出「一路沉.jpg（沉了 2 层）」');
     }
     for (const want of ['下载', '照片', '文档', '婚纱', '另一处']) {
       if (!new RegExp(want).test(treeText)) hits.push(`预览树里看不到「${want}」这一层：${treeText.slice(0, 120)}`);

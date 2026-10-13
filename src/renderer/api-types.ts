@@ -63,16 +63,22 @@ export interface PreviewSourceFolder {
   count: number;
   /** 直接躺在这一层根下、要按规则处理的散文件个数 */
   looseCount: number;
-  /** 这一份下面原样保留的文件个数（子文件夹里的 + 并进子文件夹的散文件） */
+  /** 这一份下面原样保留的文件个数（子文件夹里的 + 沉进子文件夹的散文件） */
   keptCount: number;
-  /** 有多少散文件是「并进同名子文件夹」的 */
+  /** 有多少散文件是「沉进了同名子文件夹」的 */
   mergedCount: number;
   /** 有多少散文件是「按规则新建分类夹」的 */
   classifiedCount: number;
   renamed: boolean;
   /** 这一层根下散文件按规则**新建**的分类夹 */
   categories: PreviewFolder[];
-  /** 原样保留的子树（含并进来的散文件） */
+  /** 沉进这一份的散文件（顶层为空） */
+  mergedIn: PreviewFile[];
+  /** 它们各自沉了几层（与 `mergedIn` 一一对应） */
+  sunkDepth: number[];
+  /** 它们各自的人话原因（与 `mergedIn` 一一对应） */
+  sunkReasons: string[];
+  /** 原样保留的子树（含沉进来的散文件） */
   subfolders: PreviewSubFolder[];
 }
 
@@ -83,10 +89,14 @@ export interface PreviewSubFolder {
   /** 输出里的路径（相对输出根） */
   outputPath: string;
   count: number;
-  /** 直接躺在这个目录里的文件（含并进来的散文件） */
+  /** 直接躺在这个目录里的文件（含沉进来的散文件） */
   files: PreviewFile[];
-  /** 其中是「散文件并进来」的那几个 */
+  /** 其中是「散文件沉进来」的那几个 */
   mergedIn: PreviewFile[];
+  /** 它们各自沉了几层（与 `mergedIn` 一一对应） */
+  sunkDepth: number[];
+  /** 它们各自的人话原因（与 `mergedIn` 一一对应） */
+  sunkReasons: string[];
   children: PreviewSubFolder[];
 }
 
