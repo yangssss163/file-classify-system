@@ -1,9 +1,40 @@
 /**
- * 纯逻辑：文件后缀 → 目标分类文件夹名。
+ * 纯逻辑：文件 → 目标分类文件夹名。
  *
  * 本文件**不依赖 Electron**，只用路径字符串运算，可被 node 直接 require，
  * 也可以在没有界面的情况下独立测试。
+ *
+ * 分类规则本身在 `rules.ts` 里（用户可自定义的规则表）。本文件提供：
+ *   - 五个固定分类文件夹名与后缀分组（`EXT_GROUPS`）——默认规则表的**唯一来源**；
+ *   - 路径运算（取文件名 / 取后缀）；
+ *   - 同名冲突换名。
+ * 求值一律走 `rules.ts` 的 `matchRule`，不存在第二份分类逻辑。
  */
+import {
+  FALLBACK_FOLDER,
+  defaultRules,
+  folderNamesOf,
+  matchRule,
+  type FileInfo,
+  type RuleTable,
+} from './rules';
+
+export { FALLBACK_FOLDER };
+export {
+  FALLBACK_RULE_NAME,
+  MOD_TIME_BUCKETS,
+  MOD_TIME_LABELS,
+  defaultRules,
+  createDefaultRules,
+  knownExtensions,
+  bucketOf,
+  evaluateFile,
+  matchRule,
+  matchesRule,
+  folderNamesOf,
+  activeFolderNamesOf,
+} from './rules';
+export type { FileInfo, ModTimeBucket, Rule, RuleCondition, RuleMatch, RuleTable } from './rules';
 
 /** 本片写死的五个分类文件夹（顺序即展示顺序）。 */
 export const FOLDER_IMAGES = '01_图片';
@@ -26,15 +57,19 @@ const DOCUMENT_EXTS = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'
 const MEDIA_EXTS = ['mp3', 'wav', 'mp4', 'mov', 'avi', 'mkv'];
 const ARCHIVE_EXTS = ['zip', 'rar', '7z', 'tar', 'gz'];
 
-const EXT_GROUPS: Array<{ folder: string; extensions: readonly string[] }> = [
+/**
+ * 后缀分组：默认规则表的唯一来源（`rules.ts` 据此生成「按后缀分五类」的默认规则）。
+ * 不许在别处再写一份后缀表。
+ */
+export const EXT_GROUPS: ReadonlyArray<{ folder: string; extensions: readonly string[] }> = [
   { folder: FOLDER_IMAGES, extensions: IMAGE_EXTS },
   { folder: FOLDER_DOCUMENTS, extensions: DOCUMENT_EXTS },
   { folder: FOLDER_MEDIA, extensions: MEDIA_EXTS },
   { folder: FOLDER_ARCHIVES, extensions: ARCHIVE_EXTS },
 ];
 
-/** 后缀（小写，不含点） → 文件夹名 */
-const EXT_TO_FOLDER: ReadonlyMap<string, string> = (() => {
+/** 后缀（小写，不含点） → 文件夹名（只用于给人看的说明；求值一律走规则表）。 */
+export const EXT_TO_FOLDER: ReadonlyMap<string, string> = (() => {
   const map = new Map<string, string>();
   for (const group of EXT_GROUPS) {
     for (const ext of group.extensions) {
@@ -65,9 +100,22 @@ export function extensionOf(filePath: string): string {
   return name.slice(dot + 1).toLowerCase();
 }
 
-/** 单个路径 → 目标分类文件夹名。大小写不敏感，未知后缀与无后缀都进 05_其他。 */
-export function classifyFile(filePath: string): string {
-  return EXT_TO_FOLDER.get(extensionOf(filePath)) ?? FOLDER_OTHERS;
+/**
+ * 只凭路径能给出的文件信息（没有大小与时间——那两样要真读文件属性，读盘的事在别处做）。
+ * 这里只负责后缀/文件名，供只做纯字符串运算的场合使用。
+ */
+export function fileInfoOf(filePath: string): FileInfo {
+  return { path: String(filePath ?? ''), name: baseName(filePath), ext: extensionOf(filePath), size: null, mtimeMs: null };
+}
+
+/**
+ * 单个路径 → 目标分类文件夹名（用默认规则表）。
+ * 大小与时间条件需要读文件属性，这里给不出（视为「不参与判断」），所以本函数只适合
+ * 只按后缀/关键词判断的默认规则；真正整理与预览走 `rules.ts` 的求值 + 真实元信息。
+ */
+export function classifyFile(filePath: string, rules?: RuleTable | null): string {
+  const table = rules ?? defaultRules();
+  return matchRule(table, fileInfoOf(filePath)).folder;
 }
 
 /** 「文件 → 目标文件夹」的一条映射。 */
@@ -95,23 +143,25 @@ export interface ClassifyResult {
 }
 
 /** 纯函数：输入文件路径列表，输出「文件 → 目标文件夹」映射 + 按文件夹分组的树。 */
-export function classifyFiles(filePaths: readonly string[]): ClassifyResult {
+export function classifyFiles(filePaths: readonly string[], rules?: RuleTable | null): ClassifyResult {
+  const table = rules ?? defaultRules();
   const entries: FileClassifyEntry[] = [];
   const tree: ClassifyTree = {};
   const counts: Record<string, number> = {};
 
-  for (const folder of CATEGORY_ORDER) {
+  for (const folder of folderNamesOf(table)) {
     tree[folder] = [];
     counts[folder] = 0;
   }
 
   for (const raw of filePaths ?? []) {
     const p = String(raw);
+    const info = fileInfoOf(p);
     const entry: FileClassifyEntry = {
       path: p,
-      name: baseName(p),
-      ext: extensionOf(p),
-      folder: classifyFile(p),
+      name: info.name ?? baseName(p),
+      ext: info.ext ?? extensionOf(p),
+      folder: matchRule(table, info).folder,
     };
     entries.push(entry);
     if (!tree[entry.folder]) {

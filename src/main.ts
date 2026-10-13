@@ -6,7 +6,16 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
-import { buildPreviewTree, copyFiles, type CopyFileResult, type PreviewOutcome } from './core';
+import {
+  buildPreviewTree,
+  copyFiles,
+  loadRulesFromFile,
+  saveRulesToFile,
+  RULES_FILE_NAME,
+  type CopyFileResult,
+  type PreviewOutcome,
+  type Rule,
+} from './core';
 
 /** 启动完成标记：验收脚本靠这一行判断「真程序活着」。 */
 const READY_MARKER = 'ORGANIZER_READY';
@@ -119,6 +128,27 @@ ipcMain.handle('dialog:pickOutputDir', async (): Promise<string | null> => {
   return result.filePaths[0];
 });
 
+/* ---------------- 规则：存在 userData 目录下的一个 JSON 文件里 ----------------
+ * 绝不写进项目文件夹，也绝不写进输出文件夹。
+ * （`DSH_RULES_FILE` 只给验收/排查用：把规则文件重定向到临时目录，
+ *   免得动到用户真实保存的那份规则。正常启动时这个环境变量是不存在的。）
+ */
+function rulesFilePath(): string {
+  const override = process.env.DSH_RULES_FILE;
+  if (override && override.trim().length > 0) return path.resolve(override);
+  return path.join(app.getPath('userData'), RULES_FILE_NAME);
+}
+
+ipcMain.handle('rules:load', async () => {
+  return loadRulesFromFile(rulesFilePath());
+});
+
+ipcMain.handle('rules:save', async (_event, rules: Rule[]) => {
+  return saveRulesToFile(rulesFilePath(), rules ?? []);
+});
+
+ipcMain.handle('rules:path', async (): Promise<string> => rulesFilePath());
+
 ipcMain.handle(
   'files:exists',
   async (_event, filePaths: string[]): Promise<Record<string, boolean>> => {
@@ -137,12 +167,17 @@ ipcMain.handle(
 
 ipcMain.handle(
   'files:preview',
-  async (_event, payload: { files?: string[]; outputDir?: string | null }): Promise<PreviewOutcome> => {
+  async (
+    _event,
+    payload: { files?: string[]; outputDir?: string | null; rules?: Rule[] | null },
+  ): Promise<PreviewOutcome> => {
     // 预览纯内存计算：只读 stat，不建目录、不写文件、不落任何临时产物。
+    // 规则表由界面传进来（就是当前界面上那套规则），没传就用默认规则。
     try {
       return buildPreviewTree({
         files: payload?.files ?? [],
         outputDir: payload?.outputDir ?? null,
+        rules: payload?.rules ?? null,
       });
     } catch (err) {
       return {
@@ -156,11 +191,13 @@ ipcMain.handle(
 
 ipcMain.handle(
   'files:organize',
-  async (event, payload: { files: string[]; outputDir: string }) => {
+  async (event, payload: { files: string[]; outputDir: string; rules?: Rule[] | null }) => {
     const sender = event.sender;
     const summary = await copyFiles({
       files: payload.files ?? [],
       outputDir: payload.outputDir,
+      // 同一套规则：预览说哪个文件进哪个分类，执行结果必须一致
+      rules: payload.rules ?? null,
       onProgress: (done, total, result: CopyFileResult) => {
         if (!sender.isDestroyed()) {
           sender.send('organize:progress', { done, total, result });

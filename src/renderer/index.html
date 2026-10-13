@@ -34,6 +34,18 @@
 
   <p id="notice" class="notice"></p>
 
+  <h2>分类规则（从上往下，第一条命中的生效）</h2>
+  <div class="row">
+    <span id="rule-count" class="rule-count">当前共 0 条规则</span>
+    <button id="rule-add">新增规则</button>
+    <button id="rule-default">恢复默认规则</button>
+    <button id="rule-save">保存规则</button>
+    <button id="rule-load">加载规则</button>
+  </div>
+  <p class="hint">规则名就是输出里的分类文件夹名；同一条规则里不同种类的条件之间是「并且」，同一种里多个值是「或者」。都不命中的进「05_其他」。</p>
+  <div id="rule-list" class="rule-list"></div>
+  <p id="rule-status" class="rule-status"></p>
+
   <h2>预览</h2>
   <p id="preview-warning" class="preview-warning"></p>
   <p id="preview-summary" class="summary"></p>

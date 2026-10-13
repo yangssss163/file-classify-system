@@ -6,7 +6,7 @@
  * 换名需要先知道目标文件夹里已有什么，所以真正的探测（fs）在 `copyFiles.ts` 里，
  * 这里只保留可脱离磁盘测试的纯函数。
  */
-import { classifyFiles, classifyFile, pickUniqueName, type FileClassifyEntry } from './classify';
+import { classifyFiles, classifyFile, pickUniqueName, type FileClassifyEntry, type RuleTable } from './classify';
 
 export { pickUniqueName, splitFileName, MAX_RENAME_ATTEMPTS } from './classify';
 export type { UniqueNameResult, SplitName } from './classify';
@@ -26,6 +26,7 @@ export function targetPathFor(outputDir: string, folder: string, fileName: strin
 export function planFileNames(
   filePaths: readonly string[],
   takenByFolder: Readonly<Record<string, Iterable<string>>> = {},
+  rules?: RuleTable | null,
 ): Array<FileClassifyEntry & { finalName: string; attempt: number; renamed: boolean }> {
   const taken = new Map<string, Set<string>>();
   for (const [folder, names] of Object.entries(takenByFolder ?? {})) {
@@ -33,7 +34,7 @@ export function planFileNames(
   }
 
   const result: Array<FileClassifyEntry & { finalName: string; attempt: number; renamed: boolean }> = [];
-  for (const entry of classifyFiles(filePaths).entries) {
+  for (const entry of classifyFiles(filePaths, rules).entries) {
     const folder = entry.folder;
     if (!taken.has(folder)) taken.set(folder, new Set<string>());
     const bucket = taken.get(folder)!;

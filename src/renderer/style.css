@@ -38,3 +38,21 @@ button.primary { font-weight: 600; }
 .preview-tree .file { padding: 1px 0; }
 .preview-tree .file-error { color: #dc2626; }
 .preview-tree .empty { color: #7b8794; }
+
+/* 规则编辑器：只求看得清每行有哪几种条件 */
+.rule-list { border: 1px solid #e4e8ee; border-radius: 6px; padding: 6px 10px; }
+.rule-list .rule-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 4px 0; border-bottom: 1px dashed #eef1f5; }
+.rule-list .rule-row:last-child { border-bottom: none; }
+.rule-list .rule-index { color: #7b8794; width: 20px; }
+.rule-list input[type="text"] { padding: 2px 4px; font-size: 13px; }
+.rule-list input.rule-name { width: 110px; font-weight: 600; }
+.rule-list input.rule-exts { width: 150px; }
+.rule-list input.rule-keywords { width: 130px; }
+.rule-list input.rule-min, .rule-list input.rule-max { width: 58px; }
+.rule-list select.rule-time { font-size: 13px; }
+.rule-list .rule-label { color: #52606d; font-size: 12px; }
+.rule-list .rule-disabled { opacity: 0.55; }
+.rule-list .rule-empty { color: #7b8794; }
+.rule-count { font-weight: 600; color: #2563eb; }
+.rule-status { color: #52606d; min-height: 18px; }
+.preview-rules { color: #2563eb; font-weight: 600; }

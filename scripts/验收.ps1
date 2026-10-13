@@ -2,13 +2,15 @@
 # 标准由控制台写死，工作台只执行，不修改、不放宽。
 # 跑法：npm run 验收   （= powershell -ExecutionPolicy Bypass -File scripts\验收.ps1）
 #
-# 五条断言（缺一不通过）：
+# 七条断言（缺一不通过）：
 #   1 纯逻辑测试      accept-logic-test.js    -> 分类逻辑OK
 #   2 真实复制测试    accept-copy-test.js     -> 复制落地OK
 #   3 真程序活着      真启动 electron.exe     -> 窗口活着OK（沙箱 shell 里会被 install_dir_access.cc 拦下，需非沙箱窗口跑）
 #   4 预览不落盘      accept-preview-test.js -> 预览不落盘OK
 #   5 拖入取路径      accept-drop-path-test.js -> 拖入取路径OK
 #     （拖入的文件必须真的进得来；含「探针有效性自检」与「界面产物真当脚本跑一遍」）
+#   6 规则引擎        accept-rules-test.js -> 规则引擎OK（不依赖界面，纯逻辑）
+#   7 规则编辑器      accept-rules-editor-test.js -> 规则编辑器OK（界面接线，不依赖真窗口）
 #
 # 编码约定：全链路 UTF-8。本脚本与 node 子进程之间按 UTF-8 走，日志也是 UTF-8，
 # 所以看日志别按 GBK 解（那是乱码）。判定逻辑只看退出码 + 日志里的 ASCII 标记，与编码无关。
@@ -229,7 +231,51 @@ try {
   Write-Host "拖入取路径测试异常：$($_.Exception.Message)"
 }
 
-if ($logic -and $copy -and $alive -and $preview -and $dropPath) {
+# ---------- 第 6 条：规则引擎（纯逻辑，不依赖界面） ----------
+$ruleEngine = $false
+try {
+  Write-Step '--- 6/7 规则引擎 ---'
+  $ruleTestJs = Join-Path $stage 'accept-rules-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-rules-test.js') -Destination $ruleTestJs -Force
+  $ruleLog = Join-Path $stage 'accept-rules.log'
+  # 这条要在 npm run build 之后跑（第 3 条已经跑过 build），脚本会 require out\core\index.js
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node $ruleTestJs *> $ruleLog
+  $ruleCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $ruleLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "规则引擎测试退出码=$ruleCode  日志=$ruleLog"
+  if ($ruleCode -eq 0 -and ((Get-Content -LiteralPath $ruleLog -Encoding UTF8 -Raw) -match '规则引擎OK')) {
+    Write-Step '规则引擎OK'
+    $ruleEngine = $true
+  }
+} catch {
+  Write-Host "规则引擎测试异常：$($_.Exception.Message)"
+}
+
+# ---------- 第 7 条：规则编辑器（界面接线，不依赖真窗口） ----------
+$ruleEditor = $false
+try {
+  Write-Step '--- 7/7 规则编辑器 ---'
+  $editorTestJs = Join-Path $stage 'accept-rules-editor-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-rules-editor-test.js') -Destination $editorTestJs -Force
+  $editorLog = Join-Path $stage 'accept-rules-editor.log'
+  # 这条要在 npm run build 之后跑（第 3 条已经跑过 build），
+  # 脚本会读 out\renderer\renderer.js、out\preload.js、out\main.js，并把界面产物在窗口式桩里真跑一遍。
+  # --experimental-vm-modules：要用真正的 ES module 作用域，没有它就直接判失败
+  & node --experimental-vm-modules $editorTestJs *> $editorLog
+  $editorCode = $LASTEXITCODE
+  Get-Content -LiteralPath $editorLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "规则编辑器测试退出码=$editorCode  日志=$editorLog"
+  if ($editorCode -eq 0 -and ((Get-Content -LiteralPath $editorLog -Encoding UTF8 -Raw) -match '规则编辑器OK')) {
+    Write-Step '规则编辑器OK'
+    $ruleEditor = $true
+  }
+} catch {
+  Write-Host "规则编辑器测试异常：$($_.Exception.Message)"
+}
+
+if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor) {
   Write-Step '验收通过'
   exit 0
 }
@@ -240,4 +286,6 @@ if (-not $copy) { $failedSteps += '真实复制测试' }
 if (-not $alive) { $failedSteps += '真程序活着' }
 if (-not $preview) { $failedSteps += '预览不落盘' }
 if (-not $dropPath) { $failedSteps += '拖入取路径' }
+if (-not $ruleEngine) { $failedSteps += '规则引擎' }
+if (-not $ruleEditor) { $failedSteps += '规则编辑器' }
 Fail ($failedSteps -join '+')

@@ -1,12 +1,14 @@
 /**
  * 纯逻辑：分类「预览树」。**绝对不写磁盘**——只做只读的 stat，不建目录、不写文件、不写配置。
  *
- * 分类结果本身完全复用 `classifyFiles()`（后缀 → 五个分组），
- * 文件夹名因此与真正执行复制时是同一套映射，不存在第二份常量表。
+ * 分类结果复用 `classifyWithMeta()`（与真正执行复制时的**同一个求值函数**）：
+ * 传进来的规则表既决定每个文件去哪，也决定预览里列出哪些分类文件夹。
  * 本文件**不依赖 Electron**，可被 node 直接 require 测试。
  */
 import * as fssync from 'fs';
-import { CATEGORY_ORDER, classifyFiles, type FileClassifyEntry } from './classify';
+import { baseName, extensionOf } from './classify';
+import { activeFolderNamesOf, type RuleTable } from './rules';
+import { classifyWithMeta } from './classifyWithMeta';
 import { describeError } from './copyFiles';
 
 /** 某个文件读不到元信息时的说明；能读到就是 null。 */
@@ -59,6 +61,8 @@ export interface PreviewTree {
   unreadableCount: number;
   /** 输出文件夹（仅用于显示，预览绝不创建它）；没传就是 null */
   outputDir: string | null;
+  /** 本次预览用的是不是调用方传进来的规则表（不是就是默认规则） */
+  rulesApplied: boolean;
 }
 
 /** 没选输出文件夹 / 没拖入任何文件时的提示（人话，不抛错）。 */
@@ -78,6 +82,8 @@ export interface PreviewBuildOptions {
   files: readonly string[];
   /** 输出文件夹；只用于显示，预览绝不创建或写入它 */
   outputDir?: string | null;
+  /** 分类规则表；不传就用默认规则（按后缀分五类）。与实际整理必须是同一套。 */
+  rules?: RuleTable | null;
   /**
    * 是否探测文件元信息（默认 true，只读 stat，不写盘）。
    * 置为 false 时所有文件都按「可读」记，用于不碰磁盘的纯计算场合。
@@ -122,20 +128,21 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
   }
 
   const checkReadable = options?.checkReadable !== false;
-  // 分类：完全复用现有规则（后缀 → 五个分组）+ 现有按文件夹分组逻辑
-  const classified = classifyFiles(files);
-
-  const byFolder = new Map<string, PreviewFile[]>();
-  for (const folder of CATEGORY_ORDER) byFolder.set(folder, []);
-
+  const rules = options?.rules ?? null;
+  // 分类：与真正执行复制时**同一个求值函数**（大小/时间条件要真读属性）
   const entries: PreviewFile[] = [];
-  for (const entry of classified.entries as FileClassifyEntry[]) {
-    const probe = probeFile(entry.path, checkReadable);
+  const byFolder = new Map<string, PreviewFile[]>();
+  for (const folder of activeFolderNamesOf(rules)) byFolder.set(folder, []);
+
+  for (const raw of files) {
+    const p = String(raw);
+    const matched = classifyWithMeta(rules, p);
+    const probe = probeFile(p, checkReadable);
     const item: PreviewFile = {
-      path: entry.path,
-      name: entry.name,
-      ext: entry.ext,
-      folder: entry.folder,
+      path: p,
+      name: baseName(p),
+      ext: extensionOf(p),
+      folder: matched.folder,
       readable: probe.readable,
       error: probe.error,
     };
@@ -165,6 +172,7 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
       readableCount: entries.filter((f) => f.readable).length,
       unreadableCount: entries.filter((f) => !f.readable).length,
       outputDir: String(outputDir),
+      rulesApplied: rules !== null && rules !== undefined,
     },
   };
 }

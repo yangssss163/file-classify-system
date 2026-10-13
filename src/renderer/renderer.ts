@@ -1,8 +1,15 @@
 /**
- * 界面逻辑：只管拖拽 / 按钮 / 显示，分类与复制都在 core 里、由主进程调用。
+ * 界面逻辑：只管拖拽 / 按钮 / 规则编辑 / 显示，分类与复制都在 core 里、由主进程调用。
  * 全程不阻塞：复制是异步的，进程里逐个回报进度。
  */
-import type { OrganizeProgress, OrganizerApi, PreviewOutcome, PreviewTree } from './api-types';
+import type {
+  ModTimeBucket,
+  OrganizeProgress,
+  OrganizerApi,
+  PreviewOutcome,
+  PreviewTree,
+  Rule,
+} from './api-types';
 
 declare global {
   interface Window {
@@ -13,23 +20,59 @@ declare global {
 
 const api = window.organizer;
 
+/** 兜底分类文件夹名：与 core 里那一份保持一致（core 的 rules.ts 里指向 classify.ts 的 FOLDER_OTHERS）。 */
+const FALLBACK_FOLDER = '05_其他';
+
+/** 后台求值：跟 core 里 evaluateFile / 主进程求值同一套常量，界面上不做第二份判定。 */
+const GB = 1024 * 1024 * 1024;
+
+/** 改动规则后要用的新 id：时间戳 + 递增序号，保证同一次会话里不重复。 */
+let ruleSeq = 0;
+function newRuleId(): string {
+  ruleSeq++;
+  return `rule-${Date.now().toString(36)}-${ruleSeq}`;
+}
+
+/**
+ * 取元素：拿不到就给一个空壳（挂在它上面的监听器无效，但不会让整个界面脚本崩溃）。
+ * 真正缺元素属于接线问题，由验收脚本的第 7 条（规则编辑器）盯着。
+ */
+function getEl<T>(id: string): T {
+  const found = id ? document.getElementById(id) : null;
+  return (found ?? {}) as T;
+}
+
+/** 给元素挂监听：元素不存在就跳过，不让整个界面脚本崩掉。 */
+function listen(target: unknown, type: string, handler: (ev: unknown) => void): void {
+  const t = target as { addEventListener?: (type: string, handler: (ev: unknown) => void) => void } | null;
+  if (t && typeof t.addEventListener === 'function') t.addEventListener(type, handler);
+}
+
 const el = {
-  drop: document.getElementById('drop') as HTMLDivElement,
-  pickFiles: document.getElementById('pick-files') as HTMLButtonElement,
-  clearFiles: document.getElementById('clear-files') as HTMLButtonElement,
-  fileCount: document.getElementById('file-count') as HTMLSpanElement,
-  pickOut: document.getElementById('pick-out') as HTMLButtonElement,
-  outDir: document.getElementById('out-dir') as HTMLSpanElement,
-  preview: document.getElementById('preview') as HTMLButtonElement,
-  previewWarning: document.getElementById('preview-warning') as HTMLParagraphElement,
-  previewSummary: document.getElementById('preview-summary') as HTMLParagraphElement,
-  previewTree: document.getElementById('preview-tree') as HTMLDivElement,
-  start: document.getElementById('start') as HTMLButtonElement,
-  progress: document.getElementById('progress') as HTMLSpanElement,
-  openOut: document.getElementById('open-out') as HTMLButtonElement,
-  notice: document.getElementById('notice') as HTMLParagraphElement,
-  list: document.getElementById('file-list') as HTMLDivElement,
-  summary: document.getElementById('summary') as HTMLParagraphElement,
+  drop: getEl<HTMLDivElement>('drop'),
+  pickFiles: getEl<HTMLButtonElement>('pick-files'),
+  clearFiles: getEl<HTMLButtonElement>('clear-files'),
+  fileCount: getEl<HTMLSpanElement>('file-count'),
+  pickOut: getEl<HTMLButtonElement>('pick-out'),
+  outDir: getEl<HTMLSpanElement>('out-dir'),
+  preview: getEl<HTMLButtonElement>('preview'),
+  previewWarning: getEl<HTMLParagraphElement>('preview-warning'),
+  previewSummary: getEl<HTMLParagraphElement>('preview-summary'),
+  previewTree: getEl<HTMLDivElement>('preview-tree'),
+  start: getEl<HTMLButtonElement>('start'),
+  progress: getEl<HTMLSpanElement>('progress'),
+  openOut: getEl<HTMLButtonElement>('open-out'),
+  notice: getEl<HTMLParagraphElement>('notice'),
+  list: getEl<HTMLDivElement>('file-list'),
+  summary: getEl<HTMLParagraphElement>('summary'),
+  // 规则编辑器
+  ruleCount: getEl<HTMLSpanElement>('rule-count'),
+  ruleAdd: getEl<HTMLButtonElement>('rule-add'),
+  ruleDefault: getEl<HTMLButtonElement>('rule-default'),
+  ruleSave: getEl<HTMLButtonElement>('rule-save'),
+  ruleLoad: getEl<HTMLButtonElement>('rule-load'),
+  ruleList: getEl<HTMLDivElement>('rule-list'),
+  ruleStatus: getEl<HTMLParagraphElement>('rule-status'),
 };
 
 /**
@@ -202,7 +245,8 @@ el.preview.addEventListener('click', () => {
 
     let outcome: PreviewOutcome;
     try {
-      outcome = await api.preview(selectedFiles.slice(), outputDir);
+      // 规则表就传当前界面上这一套：预览说哪个文件进哪个分类，执行时用的是同一套。
+      outcome = await api.preview(selectedFiles.slice(), outputDir, rulesForUse());
     } catch (err) {
       notice(`预览没做出来：${(err as Error)?.message ?? '未知错误'}`);
       return;
@@ -216,6 +260,7 @@ el.preview.addEventListener('click', () => {
     const tree = outcome.tree;
     el.previewWarning.textContent = PREVIEW_WARNING;
     const notes: string[] = [];
+    if (tree.rulesApplied === true) notes.push(rulesSummaryText());
     if (tree.unreadableCount > 0) notes.push(`其中 ${tree.unreadableCount} 个读不到文件信息，已标注原因`);
     if (tree.outputDir) notes.push(`计划输出到：${tree.outputDir}`);
     el.previewSummary.textContent =
@@ -231,18 +276,407 @@ function invalidatePreview(): void {
   clearPreview();
 }
 
+/* ---------------- 分类规则（用户自定义，可存可读） ----------------
+ * 「预览」和「开始整理」都带上当前这一套规则：两边用的是同一个求值函数（core 里那一份），
+ * 所以预览说哪个文件进哪个分类，执行结果必须一致。
+ */
+
+/** 界面上当前的规则表（顺序就是优先级）。 */
+let currentRules: Rule[] = [];
+
+/** 上次保存之后又改过规则没有（用来提示「还没保存」）。 */
+let rulesDirty = false;
+
+/** 界面上一次最多显示几行规则（避免规则太多把页面撑爆，不影响实际求值）。 */
+const RULE_ROWS_MAX = 50;
+
+/** 一组可以放进规则条件里的「不限」哨兵值。 */
+const LIST_SEPARATORS = /[,，、;；\s]+/;
+
+function splitList(text: string): string[] {
+  return String(text ?? '')
+    .split(LIST_SEPARATORS)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/** 列表 → 输入框里的文字（原样回显，方便用户改）。 */
+function listText(values: readonly string[] | undefined): string {
+  return (values ?? []).join(', ');
+}
+
+/** 界面上显示的一行说明：这条规则在按什么判断。 */
+function conditionText(rule: Rule): string {
+  const c = rule.condition ?? {};
+  const parts: string[] = [];
+  const exts = (c.extensions ?? []).filter((e) => e.length > 0);
+  const keys = (c.keywords ?? []).filter((k) => k.length > 0);
+  if (exts.length > 0) parts.push(`后缀 ${exts.join('/')}`);
+  else if (keys.length === 0 && (c.minSize ?? null) === null && (c.maxSize ?? null) === null && (c.modTime ?? 'any') === 'any') {
+    parts.push('任何文件');
+  }
+  if (keys.length > 0) parts.push(`文件名含 ${keys.join('/')}`);
+  const min = c.minSize ?? null;
+  const max = c.maxSize ?? null;
+  if (min !== null || max !== null) {
+    if (min !== null && max !== null) parts.push(`大小 ${min / (1024 * 1024)}~${max / (1024 * 1024)} MB`);
+    else if (min !== null) parts.push(`大小 ≥ ${min / (1024 * 1024)} MB`);
+    else parts.push(`大小 < ${(max as number) / (1024 * 1024)} MB`);
+  }
+  if ((c.modTime ?? 'any') !== 'any') {
+    parts.push(c.modTime === 'this-year' ? '修改时间=今年' : c.modTime === 'last-year' ? '修改时间=去年' : '修改时间=更早');
+  }
+  return parts.length > 0 ? parts.join(' 且 ') : '未设条件';
+}
+
+/** 输给预览/执行的那一份（只留需要的字段，避免把界面上的额外状态带过去）。 */
+function rulesForUse(): Rule[] {
+  return currentRules.map((r) => ({
+    id: r.id,
+    name: r.name,
+    enabled: r.enabled !== false,
+    condition: {
+      extensions: (r.condition?.extensions ?? []).filter((e) => e.length > 0),
+      keywords: (r.condition?.keywords ?? []).filter((k) => k.length > 0),
+      minSize: r.condition?.minSize ?? null,
+      maxSize: r.condition?.maxSize ?? null,
+      modTime: r.condition?.modTime ?? 'any',
+    },
+  }));
+}
+
+/** 一眼看出「预览用的是当前规则」。 */
+function rulesSummaryText(): string {
+  return `预览用的是当前规则（共 ${currentRules.length} 条，从上往下第一条命中生效）`;
+}
+
+function setRuleStatus(msg: string): void {
+  el.ruleStatus.textContent = msg;
+}
+
+function refreshRuleCount(): void {
+  const enabled = currentRules.filter((r) => r.enabled !== false).length;
+  el.ruleCount.textContent = `当前共 ${currentRules.length} 条规则（启用 ${enabled} 条）`;
+}
+
+/** 题头文字（"后缀" / "文件名含" / …）。 */
+function rowLabel(text: string): HTMLSpanElement {
+  const span = document.createElement('span');
+  span.className = 'rule-label';
+  span.textContent = text;
+  return span;
+}
+
+/** 一行规则里的一格输入（text / number / select 共用）。 */
+interface RuleFieldSpec {
+  className: string;
+  value: string;
+  type: string;
+  onChange?: (value: string) => void;
+  options?: Array<{ value: string; label: string }>;
+}
+
+function makeField(spec: RuleFieldSpec): HTMLInputElement | HTMLSelectElement {
+  const field = (spec.type === 'select' ? document.createElement('select') : document.createElement('input')) as
+    | HTMLInputElement
+    | HTMLSelectElement;
+  field.className = spec.className;
+  if (spec.type === 'select') {
+    for (const opt of spec.options ?? []) {
+      const option = document.createElement('option') as HTMLOptionElement;
+      option.value = opt.value;
+      option.textContent = opt.label;
+      (field as HTMLSelectElement).appendChild(option);
+    }
+    (field as HTMLSelectElement).value = spec.value;
+  } else {
+    (field as HTMLInputElement).type = spec.type;
+    (field as HTMLInputElement).value = spec.value;
+  }
+  if (spec.onChange) {
+    const change = (): void => spec.onChange?.((field as HTMLInputElement).value);
+    listen(field, 'input', change);
+    listen(field, 'change', change);
+  }
+  return field;
+}
+
+function makeButton(text: string, className: string, onClick: () => void): HTMLButtonElement {
+  const button = document.createElement('button') as HTMLButtonElement;
+  button.className = className;
+  button.textContent = text;
+  listen(button, 'click', onClick);
+  return button;
+}
+
+/** 改完规则一律：刷新条数 → 让旧预览作废 → 记「还没保存」。 */
+function setRules(next: Rule[], dirty = true): void {
+  currentRules = next;
+  if (dirty) rulesDirty = true;
+  renderRuleRows();
+  invalidatePreview();
+}
+
+/** 只改内容、不动顺序时用（避免每敲一个字就重画整张表，把光标顶掉）。 */
+function touchRule(): void {
+  rulesDirty = true;
+  refreshRuleCount();
+  invalidatePreview();
+}
+
+/** 画一行规则：启用勾选、规则名、条件、上移/下移/删除。 */
+function ruleRow(rule: Rule, index: number): HTMLDivElement {
+  const row = document.createElement('div') as HTMLDivElement;
+  row.className = rule.enabled === false ? 'rule-row rule-disabled' : 'rule-row';
+  row.setAttribute('data-rule-id', rule.id);
+
+  const checkbox = document.createElement('input') as HTMLInputElement;
+  checkbox.type = 'checkbox';
+  checkbox.checked = rule.enabled !== false;
+  checkbox.className = 'rule-enabled';
+  // 启用勾选 = 规则名前缀，给「启用勾选」一个稳定标记
+  checkbox.setAttribute('data-rule-enabled', '1');
+  listen(checkbox, 'change', () => {
+    rule.enabled = checkbox.checked;
+    setRules(currentRules.slice());
+  });
+
+  const order = document.createElement('span');
+  order.className = 'rule-index';
+  order.textContent = String(index + 1);
+
+  const nameInput = makeField({
+    className: 'rule-name',
+    type: 'text',
+    value: rule.name,
+    onChange: (value) => {
+      rule.name = value;
+      touchRule();
+    },
+  });
+
+  const extInput = makeField({
+    className: 'rule-exts',
+    type: 'text',
+    value: listText(rule.condition?.extensions),
+    onChange: (value) => {
+      rule.condition = { ...(rule.condition ?? {}), extensions: splitList(value) };
+      touchRule();
+    },
+  });
+
+  const keyInput = makeField({
+    className: 'rule-keywords',
+    type: 'text',
+    value: listText(rule.condition?.keywords),
+    onChange: (value) => {
+      rule.condition = { ...(rule.condition ?? {}), keywords: splitList(value) };
+      touchRule();
+    },
+  });
+
+  const mb = (bytes: number | null | undefined): string =>
+    bytes === null || bytes === undefined ? '' : String(Number((bytes / (1024 * 1024)).toFixed(4)));
+  const numberOrNull = (value: string): number | null => {
+    const n = Number(value);
+    return value === '' || !Number.isFinite(n) ? null : n;
+  };
+
+  const minInput = makeField({
+    className: 'rule-min',
+    type: 'text',
+    value: mb(rule.condition?.minSize),
+    onChange: (value) => {
+      const n = numberOrNull(value);
+      rule.condition = { ...(rule.condition ?? {}), minSize: n === null ? null : n * 1024 * 1024 };
+      touchRule();
+    },
+  });
+
+  const maxInput = makeField({
+    className: 'rule-max',
+    type: 'text',
+    value: mb(rule.condition?.maxSize),
+    onChange: (value) => {
+      const n = numberOrNull(value);
+      rule.condition = { ...(rule.condition ?? {}), maxSize: n === null ? null : n * 1024 * 1024 };
+      touchRule();
+    },
+  });
+
+  const timeSelect = makeField({
+    className: 'rule-time',
+    type: 'select',
+    value: rule.condition?.modTime ?? 'any',
+    options: [
+      { value: 'any', label: '不限' },
+      { value: 'this-year', label: '今年' },
+      { value: 'last-year', label: '去年' },
+      { value: 'earlier', label: '更早' },
+    ],
+    onChange: (value) => {
+      rule.condition = { ...(rule.condition ?? {}), modTime: value as ModTimeBucket };
+      touchRule();
+    },
+  });
+
+  const upBtn = makeButton('↑ 上移', 'rule-up', () => {
+    if (index <= 0) return;
+    const next = currentRules.slice();
+    const [moved] = next.splice(index, 1);
+    next.splice(index - 1, 0, moved);
+    setRules(next);
+  });
+  const downBtn = makeButton('↓ 下移', 'rule-down', () => {
+    if (index >= currentRules.length - 1) return;
+    const next = currentRules.slice();
+    const [moved] = next.splice(index, 1);
+    next.splice(index + 1, 0, moved);
+    setRules(next);
+  });
+  const delBtn = makeButton('删除', 'rule-delete', () => {
+    setRules(currentRules.filter((_, i) => i !== index));
+  });
+
+  for (const child of [
+    checkbox,
+    order,
+    nameInput,
+    rowLabel('后缀'),
+    extInput,
+    rowLabel('文件名含'),
+    keyInput,
+    rowLabel('大小MB'),
+    minInput,
+    rowLabel('至'),
+    maxInput,
+    rowLabel('时间'),
+    timeSelect,
+    upBtn,
+    downBtn,
+    delBtn,
+  ]) {
+    row.appendChild(child);
+  }
+  return row;
+}
+
+/** 重画整张规则表。 */
+function renderRuleRows(): void {
+  el.ruleList.textContent = '';
+  if (currentRules.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'rule-empty';
+    empty.textContent = '一条规则也没有：所有文件都会进「' + FALLBACK_FOLDER + '」。可以点「新增规则」或「恢复默认规则」。';
+    el.ruleList.appendChild(empty);
+  } else {
+    currentRules.slice(0, RULE_ROWS_MAX).forEach((rule, index) => {
+      el.ruleList.appendChild(ruleRow(rule, index));
+    });
+    if (currentRules.length > RULE_ROWS_MAX) {
+      const more = document.createElement('div');
+      more.className = 'rule-empty';
+      more.textContent = `（规则太多，只显示前 ${RULE_ROWS_MAX} 行；求值仍然用全部 ${currentRules.length} 条）`;
+      el.ruleList.appendChild(more);
+    }
+  }
+  refreshRuleCount();
+}
+
+/* ---------------- 规则：保存 / 加载 / 恢复默认 ---------------- */
+
+function describeLoad(result: { message?: string } | null | undefined): string {
+  return result && typeof result.message === 'string' && result.message.length > 0 ? result.message : '已读取规则';
+}
+
+async function saveRulesToDisk(): Promise<void> {
+  let result: { ok?: boolean; message?: string } | null = null;
+  try {
+    result = await api.saveRules(rulesForUse());
+  } catch (err) {
+    setRuleStatus(`保存规则失败：${(err as Error)?.message ?? '未知错误'}`);
+    return;
+  }
+  const ok = result?.ok !== false;
+  if (ok) rulesDirty = false;
+  setRuleStatus(result?.message ?? (ok ? '已保存规则' : '保存规则失败'));
+  notice(ok ? '规则已保存，下次打开还在' : '规则保存失败');
+}
+
+async function loadRulesFromDisk(): Promise<void> {
+  let result: { ok?: boolean; rules?: Rule[] | null; message?: string } | null = null;
+  try {
+    result = await api.loadRules();
+  } catch (err) {
+    setRuleStatus(`读规则失败：${(err as Error)?.message ?? '未知错误'}（先用默认规则）`);
+    return;
+  }
+  const rules = Array.isArray(result?.rules) ? (result?.rules as Rule[]) : [];
+  if (rules.length === 0) {
+    setRuleStatus('没有读到规则，先用默认规则');
+    return;
+  }
+  setRules(rules, false);
+  setRuleStatus(describeLoad(result));
+  notice('规则已就绪');
+}
+
+listen(el.ruleAdd, 'click', () => {
+  const next = currentRules.slice();
+  next.push({ id: newRuleId(), name: '新分类', enabled: true, condition: { extensions: [], keywords: [], minSize: null, maxSize: null, modTime: 'any' } });
+  setRules(next);
+  setRuleStatus(`已新增 1 条规则，当前共 ${next.length} 条（记得点「保存规则」）`);
+});
+
+listen(el.ruleDefault, 'click', () => {
+  void (async () => {
+    let rules: Rule[] = [];
+    try {
+      // 规则表、后缀表都由 core 给（单一来源），界面不另写一份默认规则。
+      rules = (await api.loadRules()).rules;
+    } catch {
+      rules = [];
+    }
+    if (!Array.isArray(rules) || rules.length === 0) {
+      setRuleStatus('没能取到默认规则');
+      return;
+    }
+    setRules(rules, true);
+    setRuleStatus('已恢复默认规则（按后缀分五类）：点「保存规则」才会写盘');
+  })();
+});
+
+listen(el.ruleSave, 'click', () => void saveRulesToDisk());
+listen(el.ruleLoad, 'click', () => void loadRulesFromDisk());
+
+/** 启动时自动读取上次保存的规则；读不到就回落默认规则并给人话提示（不崩）。 */
+async function initRules(): Promise<void> {
+  try {
+    const result = await api.loadRules();
+    if (result && Array.isArray(result.rules) && result.rules.length > 0) {
+      currentRules = result.rules;
+      setRuleStatus(describeLoad(result));
+    } else {
+      setRuleStatus('没有读到规则，先用默认规则');
+    }
+  } catch (err) {
+    setRuleStatus(`读规则失败：${(err as Error)?.message ?? '未知错误'}（先用默认规则）`);
+  }
+  renderRuleRows();
+}
+
 /* ---------------- 拖拽 ---------------- */
 
 ['dragenter', 'dragover'].forEach((type) => {
-  el.drop.addEventListener(type, (ev) => {
-    ev.preventDefault();
+  listen(el.drop, type, (ev) => {
+    (ev as DragEvent).preventDefault();
     el.drop.classList.add('over');
   });
 });
 
 ['dragleave', 'drop'].forEach((type) => {
-  el.drop.addEventListener(type, (ev) => {
-    ev.preventDefault();
+  listen(el.drop, type, (ev) => {
+    (ev as DragEvent).preventDefault();
     el.drop.classList.remove('over');
   });
 });
@@ -296,7 +730,7 @@ el.pickFiles.addEventListener('click', () => {
   })();
 });
 
-el.clearFiles.addEventListener('click', () => {
+listen(el.clearFiles, 'click', () => {
   selectedFiles = [];
   refreshCounts();
   invalidatePreview();
@@ -317,7 +751,7 @@ el.pickOut.addEventListener('click', () => {
   })();
 });
 
-el.openOut.addEventListener('click', () => {
+listen(el.openOut, 'click', () => {
   if (!outputDir) {
     notice('还没选输出文件夹');
     return;
@@ -350,6 +784,7 @@ el.start.addEventListener('click', () => {
 
     const files = selectedFiles.slice();
     const out = outputDir;
+    const rules = rulesForUse();
     running = true;
     el.start.disabled = true;
     el.list.textContent = '';
@@ -357,7 +792,8 @@ el.start.addEventListener('click', () => {
     notice('正在整理（只复制，不动原文件）…');
 
     try {
-      const summary = await api.organize(files, out);
+      // 与预览同一套规则：预览说哪个文件进哪个分类，这里就必须一致。
+      const summary = await api.organize(files, out, rules);
       el.progress.textContent = `已处理 ${summary.total} / 共 ${summary.total}`;
       el.summary.textContent = `整理完成：成功 ${summary.successCount} 个，失败 ${summary.failureCount} 个`;
       notice(`输出目录：${summary.outputDir}`);
@@ -373,3 +809,5 @@ el.start.addEventListener('click', () => {
 
 refreshCounts();
 renderOutDir();
+// 启动时自动读上次保存的规则（读不到就默认规则 + 人话提示，这里绝不崩）
+void initRules();

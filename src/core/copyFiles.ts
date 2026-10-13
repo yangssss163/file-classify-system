@@ -8,7 +8,9 @@
 import * as fs from 'fs/promises';
 import * as fssync from 'fs';
 import * as path from 'path';
-import { classifyFile, pickUniqueName, MAX_RENAME_ATTEMPTS } from './classify';
+import { defaultRules, type RuleTable } from './rules';
+import { classifyWithMeta } from './classifyWithMeta';
+import { pickUniqueName, MAX_RENAME_ATTEMPTS } from './classify';
 
 export interface CopyFileResult {
   /** 原文件路径 */
@@ -40,6 +42,11 @@ export interface CopyOptions {
   outputDir: string;
   /** 要复制的原文件路径列表 */
   files: readonly string[];
+  /**
+   * 分类规则表；不传就用默认规则（按后缀分五类）。
+   * **预览与执行必须传同一套规则**，否则会出现「预览说去 A、执行却去了 B」。
+   */
+  rules?: RuleTable | null;
   /** 每处理完一个文件回调一次，用于界面进度 */
   onProgress?: (done: number, total: number, result: CopyFileResult) => void;
 }
@@ -87,6 +94,7 @@ async function listTakenNames(dir: string): Promise<Set<string>> {
 export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
   const outputDir = path.resolve(options.outputDir);
   const files = Array.from(options.files ?? []);
+  const rules = options.rules ?? defaultRules();
   const results: CopyFileResult[] = [];
 
   // 预建五个分类文件夹 + 读一次已存在的名字（同名冲突判定用）
@@ -105,9 +113,12 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
   let done = 0;
   for (const rawSource of files) {
     const source = String(rawSource);
-    const folder = classifyFile(source);
     const originalName = path.basename(source);
     done++;
+
+    // 分类：与预览用同一个求值函数（大小/时间条件要真读属性，读不到就当作该项不命中）
+    const matched = classifyWithMeta(rules, source, originalName);
+    const folder = matched.folder;
 
     const base: CopyFileResult = {
       source,

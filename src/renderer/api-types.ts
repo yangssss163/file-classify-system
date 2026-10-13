@@ -54,6 +54,8 @@ export interface PreviewTree {
   readableCount: number;
   unreadableCount: number;
   outputDir: string | null;
+  /** 本次预览用的是不是界面上的规则表（不是就是默认规则） */
+  rulesApplied: boolean;
 }
 
 /** 没选输出文件夹 / 没拖入任何文件时的提示（人话，不抛错）。 */
@@ -98,6 +100,47 @@ export interface OrganizeProgress {
   };
 }
 
+/** 修改时间的三种分档。 */
+export type ModTimeBucket = 'any' | 'this-year' | 'last-year' | 'earlier';
+
+/** 规则条件：四种可组合；没写的项不参与判断。 */
+export interface RuleCondition {
+  /** 后缀列表（小写、不含点；匹配大小写不敏感） */
+  extensions?: readonly string[];
+  /** 文件名关键词列表（含任意一个就命中，大小写不敏感） */
+  keywords?: readonly string[];
+  /** 大小下界（字节，含）；null = 不限 */
+  minSize?: number | null;
+  /** 大小上界（字节，不含）；null = 不限 */
+  maxSize?: number | null;
+  /** 修改时间分档 */
+  modTime?: ModTimeBucket;
+}
+
+/** 一条分类规则（规则名 = 输出的分类文件夹名）。 */
+export interface Rule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  condition: RuleCondition;
+}
+
+/** 规则读取结果（`ok=false` 时 rules 一定是可用的默认规则）。 */
+export interface RulesLoadResult {
+  ok: boolean;
+  rules: Rule[];
+  source: 'file' | 'default';
+  message: string;
+  filePath: string;
+}
+
+/** 规则保存结果。 */
+export interface RulesSaveResult {
+  ok: boolean;
+  message: string;
+  filePath: string;
+}
+
 /** 预加载脚本暴露到 window.organizer 上的那一套方法。 */
 export interface OrganizerApi {
   /** 把拖进来的 File 换成磁盘路径（preload 里用 webUtils.getPathForFile）；取不到给 null */
@@ -105,9 +148,15 @@ export interface OrganizerApi {
   pickFiles(): Promise<string[]>;
   pickOutputDir(): Promise<string | null>;
   exists(filePaths: string[]): Promise<Record<string, boolean>>;
-  /** 预览：只读计算，绝不写盘 */
-  preview(files: string[], outputDir: string | null): Promise<PreviewOutcome>;
-  organize(files: string[], outputDir: string): Promise<CopySummary>;
+  /** 预览：只读计算，绝不写盘；规则表由界面传进去，跟当前界面上的规则保持一致 */
+  preview(files: string[], outputDir: string | null, rules?: Rule[] | null): Promise<PreviewOutcome>;
+  organize(files: string[], outputDir: string, rules?: Rule[] | null): Promise<CopySummary>;
   openPath(dir: string): Promise<string>;
+  /** 读取上次保存的规则；读不到就是默认规则 */
+  loadRules(): Promise<RulesLoadResult>;
+  /** 保存规则到 userData 目录下的 JSON 文件 */
+  saveRules(rules: Rule[]): Promise<RulesSaveResult>;
+  /** 规则文件路径（只用于显示） */
+  rulesPath(): Promise<string>;
   onProgress(handler: (p: OrganizeProgress) => void): void;
 }
