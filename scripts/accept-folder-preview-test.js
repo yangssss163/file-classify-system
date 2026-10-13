@@ -596,20 +596,24 @@ async function inspectFolderSupport(productSource, label, ctx) {
       if (!/个文件/.test(text)) hits.push(`某一层源文件夹没有写清有几个文件：「${text.slice(0, 80)}」`);
     }
 
-    // 新语义：界面上必须**明确写出那句人话**（子文件夹按原样保留；散文件先并进同名子文件夹，没有才按规则分类）
+    // 最终语义：界面上必须**明确写出那句人话**，而且要与控制台定的措辞一字不差
     const keepNodes = findByClass(treeEl, 'keep');
     if (keepNodes.length === 0) {
-      hits.push('预览树里没有「原样保留的子树」节点（class="keep"）——子文件夹里的文件没按新语义画出来');
+      hits.push('预览树里没有「原样保留的子树」节点（class="keep"）——子文件夹里的文件没按最终语义画出来');
     }
     const hint = treeEl.children.find((c) => c.className === 'keep-hint');
     if (!hint) {
-      hits.push('预览树里没有那句说明（class="keep-hint"）——界面上看不出「子文件夹按原样保留 / 散文件先并进同名子文件夹」');
+      hits.push('预览树里没有那句说明（class="keep-hint"）——界面上看不出「子文件夹按原样保留 / 散文件并进同名子文件夹」');
     } else {
       const hintText = String(hint.textContent || '');
+      const WANT_HINT =
+        '子文件夹里的文件按原样保留（连层级一起搬）；散在源文件夹自己那层根下的文件，若这一层有和它同名的子文件夹（按文件名去扩展名比对）就并进去，否则按当前规则新建分类夹。';
+      // 注意：这几个关键词都取自**用户看到的那句话本身**，
+      // 而且不能与「有没有并入说明」那条判据的关键词（个是这次并进来的散文件）撞词。
       if (!/原样保留/.test(hintText)) hits.push(`那句说明没说「原样保留」：「${hintText}」`);
-      if (!/同名子文件夹/.test(hintText)) hits.push(`那句说明没说「先并进同名子文件夹」：「${hintText}」`);
-      if (!/规则/.test(hintText)) hits.push(`那句说明没说「没有同名的才按规则分类」：「${hintText}」`);
-      if (!/子文件夹/.test(hintText)) hits.push(`那句说明没说清「子文件夹」：「${hintText}」`);
+      if (!/同名的子文件夹/.test(hintText)) hits.push(`那句说明没说「并进同名的子文件夹」：「${hintText}」`);
+      if (!/按当前规则新建分类夹/.test(hintText)) hits.push(`那句说明没说「否则按当前规则新建分类夹」：「${hintText}」`);
+      if (hintText !== WANT_HINT) hits.push(`界面上那句说明与控制台定的措辞不一致：「${hintText}」`);
     }
 
     // 「并进同名子文件夹」这件事必须在界面上看得见（不能只是分组好看）

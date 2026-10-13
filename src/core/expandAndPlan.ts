@@ -42,9 +42,9 @@ import { describeError } from './copyFiles';
 /** 递归深度上限：超过就停下并说明原因（防止循环/超深目录把程序拖死）。 */
 export const MAX_SCAN_DEPTH = 20;
 
-/** 界面上那句人话（预览里必须明确写出来）。只有这一个来源，不许在别处再写一份。 */
+/** 界面上那句人话（预览里必须明确写出来，也就是用户看到的那段说明）。只有这一个来源，不许在别处再写一份。 */
 export const FOLDER_KEEP_HINT =
-  '子文件夹里的文件按原样保留（连层级一起搬过去），不再按规则重分；散在源文件夹自己那层根下的文件，先并进同名的子文件夹（如果这一层已经有那个子文件夹），没有同名子文件夹时才按规则建分类夹。';
+  '子文件夹里的文件按原样保留（连层级一起搬）；散在源文件夹自己那层根下的文件，若这一层有和它同名的子文件夹（按文件名去扩展名比对）就并进去，否则按当前规则新建分类夹。';
 
 /* ------------------------------------------------------------------ *
  * 类型
@@ -440,11 +440,18 @@ export function targetDirOf(outputDir: string, outputChain: readonly string[]): 
   return outputChain.length === 0 ? outputDir : `${outputDir}${sep}${outputChain.join(path.sep)}`;
 }
 
+/** 这一份（含子树）里所有「原样保留 + 并进来」的文件。 */
+function allKeptOf(folder: PlannedFolder): PlannedFile[] {
+  const out: PlannedFile[] = [];
+  for (const f of folder.keptFiles) out.push(f);
+  for (const f of folder.mergedInto) out.push(f);
+  for (const sub of folder.subfolders) for (const f of allKeptOf(sub)) out.push(f);
+  return out;
+}
+
 /** 这一份（含子树）原样保留 + 并入的文件个数（不含本层按规则分类的散文件）。 */
 export function countKeptOf(folder: PlannedFolder): number {
-  let n = folder.keptFiles.length + folder.mergedInto.length;
-  for (const sub of folder.subfolders) n += countKeptOf(sub);
-  return n;
+  return allKeptOf(folder).length;
 }
 
 /** 这一份（含子树）里按规则新建分类夹放进去的散文件个数。 */
@@ -564,21 +571,25 @@ export function buildPlan(options: PlanOptions): PlanResult {
         continue;
       }
 
-      // 散文件（只在这一层、只有顶层源文件夹走这条路）：
-      //  1. 这一层已有的**同名子文件夹**可以收下它 → 并进去（不再按规则另建分类夹）；
-      //  2. 没有同名子文件夹 → 按规则建分类夹；
-      //  3. 同名位置上其实是**文件** → 不许覆盖它，退回第 2 步并给一句说明。
-      // 「同名」= 这个文件自己的名字（含后缀）去掉扩展名，跟同一层子文件夹的名字比；
-      // 大小写不敏感（Windows 语义），而且只跟**同一层**比，不跨层。
+      // 散文件（只在这一层、只有顶层源文件夹走这条路）：按顺序判定，每一步都记一句人话原因。
+      //  1. 这一层有**同名子文件夹**（名字 = 这个文件自己的名字去掉扩展名，大小写不敏感，只比同一层）→ 并进去；
+      //  2. 被同名**文件**占位 → 不许覆盖它，退回第 3 步并说明；
+      //  3. 按规则新建分类夹。
+      // 第 1 步有一条**防误伤**的硬保护：如果那个同名子文件夹里已经有文件、但**一个**属于
+      // 本文件该去的规则分类夹的文件都没有（说明它根本不是装这类东西的），就不硬塞，
+      // 退回第 3 步并说明原因 —— 免得为了「同名」把既有的目录结构打乱。
       const stem = splitFileName(file.name).stem;
+      const matched = classifyWithMeta(rules, file.fullPath, file.name);
+      const categoryName = matched.folder;
       const sameNameDir = joinedPath(outputDirPath, stem);
       let mergeInto: PlannedFolder | null =
         planned.subfolders.find((s) => s.outputName.toLowerCase() === stem.toLowerCase()) ?? null;
       let mergeReason = mergeInto
-        ? `这一层已经有同名的子文件夹 ${mergeInto.outputName}\\，散文件并进它（不另建分类夹）`
+        ? `这一层有和它同名的子文件夹 ${mergeInto.outputName}\\（按文件名「${stem}」比对），散文件并进它，不另建分类夹`
         : '';
+
       if (mergeInto) {
-        // 万一那个位置上已经被一个同名**文件**占着（不许覆盖），就退回按规则建分类夹
+        // 保护一：同名位置上其实是个**文件**（不许覆盖）→ 退回按规则建分类夹
         try {
           const st = fssync.statSync(sameNameDir);
           if (!st.isDirectory()) {
@@ -588,13 +599,31 @@ export function buildPlan(options: PlanOptions): PlanResult {
         } catch {
           /* 目录还不存在，属正常 */
         }
-      } else {
-        // 没找到同名子文件夹：这里再确认一下「同名位置上是不是被一个**文件**占着」
-        // 两种情形都算：
-        //  a) 这一层真的有个文件，名字正好等于这个文件夹名（例如散文件 发票.png → 名字 发票）；
-        //  b) 这一层有个文件，名字正好等于**规则算出来的分类夹名**（例如有个文件叫 01_图片，
-        //     那么散文件按规则要去的 01_图片 这个位置就被它占着）。
-        const candidates = [stem, classifyWithMeta(rules, file.fullPath, file.name).folder];
+      }
+
+      if (mergeInto) {
+        // 保护二（防误伤，硬保护）：同名子文件夹里**已经有文件**、但这些文件里**一个**属于
+        // 本文件该去的规则分类夹的都没有（例如 照片\ 里只有 a.mp4，却想把 照片.jpg 塞进去）→
+        // 不硬塞，退回按规则建分类夹并说明；
+        // 同名子文件夹是**空的**、或者里面本来就有同一类的文件（例如 发票\ 里已有 老发票.pdf）
+        // → 照常并进去，不打乱原有结构。
+        const inside = allKeptOf(mergeInto);
+        const insideCategories = inside.map((f) => classifyWithMeta(rules, f.fullPath, f.name).folder);
+        if (inside.length > 0 && !insideCategories.includes(categoryName)) {
+          mergeReason =
+            `这一层有和它同名的子文件夹 ${mergeInto.outputName}\\，但它里面只有 ` +
+            `${inside.map((f) => f.name).join('、')}（属于「${Array.from(new Set(insideCategories)).join('、')}」），` +
+            `一个「${categoryName}」类的文件都没有、根本不是装这类东西的，所以没有硬塞进去；` +
+            `按当前规则新建分类夹 ${categoryName}\\`;
+          mergeInto = null;
+        }
+      }
+
+      if (!mergeInto && mergeReason.length === 0) {
+        // 没找到同名子文件夹：再确认一下「同名位置上是不是被一个**文件**占着」。两种都算：
+        //  a) 这一层有个文件，名字正好等于本文件的名字（去掉扩展名）；
+        //  b) 这一层有个文件，名字正好等于**规则算出来的分类夹名**（例如有个文件叫 01_图片）。
+        const candidates = [stem, categoryName];
         for (const name of candidates) {
           if (name.length === 0) continue;
           try {
@@ -629,8 +658,6 @@ export function buildPlan(options: PlanOptions): PlanResult {
         continue;
       }
 
-      const matched = classifyWithMeta(rules, file.fullPath, file.name);
-      const categoryName = matched.folder;
       const categoryDir = joinedPath(outputDirPath, categoryName);
       const placed = placeName(categoryDir, file.name);
       const entry: PlannedFile = {
