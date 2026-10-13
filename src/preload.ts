@@ -3,6 +3,8 @@
  */
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
+  AiClassifyResult,
+  AiStatus,
   CopySummary,
   OutputDirectionCheck,
   PreviewOutcome,
@@ -85,6 +87,15 @@ const api = {
     files?: string[] | null;
     outputDir?: string | null;
   }): Promise<OutputDirectionCheck> => ipcRenderer.invoke('output:check', input ?? {}),
+  /**
+   * 换一种分法：AI 分类那两件事的通道（**界面只能走这里**）。
+   * - `aiStatus()`：界面上那行常显状态（「AI 分类：未配置」是核心模块给的原话，界面不另写一份）；
+   * - `aiClassify()`：调一次 AI 分类，界面把文件路径给进来、由核心的把路径收成「文件列表 + 元信息」。
+   * 本片只搭壳：不联网络、不读密钥、不写盘，没配置就如实回话。实现全在 core 的 aiClassify 模块里。
+   */
+  aiStatus: (): Promise<AiStatus> => ipcRenderer.invoke('ai:status'),
+  aiClassify: (filePaths: string[], outputDir?: string | null): Promise<AiClassifyResult> =>
+    ipcRenderer.invoke('ai:classify', { filePaths: filePaths ?? [], outputDir: outputDir ?? null }),
   // 规则读写：主进程写到 Electron 的 userData 目录下的一个 JSON 文件
   loadRules: (): Promise<RulesLoadResult> => ipcRenderer.invoke('rules:load'),
   saveRules: (rules: Rule[]): Promise<RulesSaveResult> => ipcRenderer.invoke('rules:save', rules),

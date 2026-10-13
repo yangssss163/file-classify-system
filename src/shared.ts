@@ -2,6 +2,8 @@
  * 界面与主进程之间的接口类型（只用于类型检查，运行时不加载）。
  */
 import type {
+  AiClassifyResult,
+  AiStatus,
   CopySummary,
   OutputDirectionCheck,
   PreviewOutcome,
@@ -59,5 +61,12 @@ export interface OrganizerApi {
     files?: string[] | null;
     outputDir?: string | null;
   }): Promise<OutputDirectionCheck>;
+  /**
+   * 「换一种分法：AI 分类」那两件事的通道（界面只能走这里）。
+   * `aiStatus()` 给界面上那行常显状态；`aiClassify()` 调一次 AI 分类。
+   * 本片只搭壳：不联网络、不读密钥、不写盘；实现只有 core/aiClassify.ts 一处。
+   */
+  aiStatus(): Promise<AiStatus>;
+  aiClassify(filePaths: string[], outputDir?: string | null): Promise<AiClassifyResult>;
   onProgress(handler: (p: OrganizeProgress) => void): void;
 }

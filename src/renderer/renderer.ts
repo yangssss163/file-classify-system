@@ -3,6 +3,7 @@
  * 全程不阻塞：复制是异步的，进程里逐个回报进度。
  */
 import type {
+  AiSeedStatus,
   ModTimeBucket,
   OrganizeProgress,
   OrganizerApi,
@@ -115,6 +116,10 @@ const el = {
   undoHint: getEl<HTMLSpanElement>('undo-hint'),
   undoWarning: getEl<HTMLParagraphElement>('undo-warning'),
   undoReport: getEl<HTMLDivElement>('undo-report'),
+  // 换一种分法：AI 分类（本片只搭壳）
+  aiReclassify: getEl<HTMLButtonElement>('ai-reclassify'),
+  aiStatus: getEl<HTMLSpanElement>('ai-status'),
+  aiNotice: getEl<HTMLParagraphElement>('ai-notice'),
 };
 
 /**
@@ -1350,6 +1355,121 @@ listen(el.undo, 'click', () => {
   })();
 });
 
+/* ---------------- 换一种分法：AI 分类（本片只搭壳） ----------------
+ * 用户要的那条路：整轮整理完觉得分得不好 → 先把这次复制出去的撤销掉 → 再换一种分法重来。
+ * **顺序是硬要求**：① 撤销接口被调到 → ② 撤销成功之后才去调 AI 分类接口。
+ *   - 撤销没成功（有文件删不掉）→ 如实显示撤销报告，**不往下调 AI**（不在没撤干净的状态上再叠一层）；
+ *   - 没有可撤销的整理 → 只给一句提示，**不删任何东西**，也不调 AI；
+ *   - 撤销成了、AI 没配置 → 说清「已撤销 N 个 + AI 分类还没配置」两层信息。
+ * 与 AI 有关的实现只有 core/aiClassify.ts 一处；界面这里只调预加载暴露的那两个方法。
+ */
+
+/** 撤销结果里那几个数字（界面只用人话 + 这几个数）。 */
+interface UndoOutcomeView {
+  result?: {
+    ok?: boolean;
+    message?: string;
+    deletedFiles?: number;
+    files?: { target: string; action: string; reason: string }[];
+    dirs?: { dir: string; action: string; reason: string }[];
+  } | null;
+  summary?: UndoSummary | null;
+}
+
+/**
+ * 界面上那行**常显**的 AI 状态（不用点按钮就能看出「现在只有规则分类可用」）。
+ * 文字由核心模块给（`api.aiStatus()`），界面照抄 —— 界面里不许再写死一份。
+ */
+async function refreshAiStatus(): Promise<void> {
+  try {
+    const status = (await api.aiStatus()) as AiSeedStatus | null;
+    if (status && typeof status.label === 'string' && status.label.length > 0) {
+      el.aiStatus.textContent = status.label;
+      el.aiStatus.className = status.configured === true ? 'hint ai-ready' : 'hint';
+      return;
+    }
+  } catch {
+    /* 读不到就退回下面那句兜底，绝不把界面搞崩 */
+  }
+  el.aiStatus.textContent = 'AI 分类：未配置';
+  el.aiStatus.className = 'hint';
+}
+
+/** 把「撤销报告」画一遍（撤销失败时也要如实显示 —— 这正是它存在的意义）。 */
+function renderUndoOutcomeReport(view: UndoOutcomeView | null): void {
+  const result = view?.result;
+  if (!result) return;
+  renderUndoReport({
+    message: String(result.message ?? '撤销没有结果'),
+    files: (result.files ?? []) as { target: string; action: string; reason: string }[],
+    dirs: (result.dirs ?? []) as { dir: string; action: string; reason: string }[],
+  });
+}
+
+el.aiReclassify.addEventListener('click', () => {
+  void (async () => {
+    el.aiNotice.textContent = '';
+    renderUndoOutcomeReport(null);
+
+    // ① 先问清楚：有没有可撤销的整理（没有就只给一句提示，绝不删东西、也不调 AI）
+    let summary: UndoSummary | null = null;
+    try {
+      summary = (await api.lastRun()) as UndoSummary | null;
+    } catch {
+      summary = null;
+    }
+    currentUndo = {
+      count: summary && typeof summary.fileCount === 'number' ? summary.fileCount : 0,
+      outputDir: summary && summary.outputDir ? summary.outputDir : '',
+    };
+    renderUndoSummary(summary);
+
+    if (!summary || summary.available !== true) {
+      el.aiNotice.textContent = `没有可撤销的整理（${summary?.reason ?? '还没有整理过'}）：没有删任何东西，也没有换分法。`;
+      return;
+    }
+
+    // ② 先撤销：这一步必须在调 AI 之前（顺序是硬要求）
+    let outcome: UndoOutcomeView | null = null;
+    try {
+      outcome = (await api.undoLastRun()) as UndoOutcomeView;
+    } catch (err) {
+      el.aiNotice.textContent = `撤销失败：${(err as Error)?.message ?? '未知错误'}（没有删掉东西，也没有换分法）`;
+      await refreshUndo();
+      return;
+    }
+    const result = outcome?.result ?? null;
+    if (!result) {
+      el.aiNotice.textContent = '撤销没有结果，请看下面的记录；没有换分法';
+      await refreshUndo();
+      return;
+    }
+
+    renderUndoOutcomeReport(outcome);
+    renderUndoSummary((outcome?.summary ?? null) as UndoSummary | null);
+    notice(outcome?.result?.message ?? '');
+
+    // 撤销本身失败了（有文件删不掉）→ 如实显示报告，**不往下调 AI**
+    if (outcome?.result?.ok !== true) {
+      el.aiNotice.textContent = '撤销没有成功，这次不换分法：先按下面的撤销报告把没撤掉的处理掉';
+      el.aiReclassify.disabled = true;
+      return;
+    }
+
+    // ③ 撤销成功之后，才去问 AI 分类（本片恒「还没配置」，如实转告）
+    let ai: { ok?: boolean; message?: string; reason?: string } | null = null;
+    try {
+      ai = (await api.aiClassify(collectFiles(), outputDir)) as { ok?: boolean; message?: string; reason?: string };
+    } catch (err) {
+      el.aiNotice.textContent = `本次已撤销（删掉 ${result.deletedFiles ?? 0} 个文件）。AI 分类没能调起来：${(err as Error)?.message ?? '未知错误'}`;
+      return;
+    }
+    const aiMessage = ai && typeof ai.message === 'string' && ai.message.length > 0 ? ai.message : 'AI 分类没有结果。';
+    el.aiNotice.textContent = `本次已撤销（删掉 ${result.deletedFiles ?? 0} 个文件）。${aiMessage}`;
+    await refreshAiStatus();
+  })();
+});
+
 refreshCounts();
 renderOutDir();
 // 启动时自动读上次保存的规则（读不到就默认规则 + 人话提示，这里绝不崩）
@@ -1357,5 +1477,7 @@ void initRules();
 // 启动时顺手报一次「上一次整理」的状态：有可撤销的 → 按钮可点；没有 / 已撤过 → 按钮不可点 + 说清原因。
 // 记录在主进程 userData 下（持久化），所以关掉程序再打开，上一次整理仍然可撤。
 void refreshUndo();
+// 启动时顺手把「AI 分类：未配置」那行状态显出来：不用点按钮就知道现在只有规则分类可用。
+void refreshAiStatus();
 // 方向校验：界面刚起来时名单是空的，先算一遍（结论就是「还没有可整理的文件」）
 refreshDirectionNow();

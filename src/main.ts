@@ -7,10 +7,12 @@ import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import {
+  aiClassifyByPaths,
   buildPreviewTree,
   checkOutputDirection,
   copyFiles,
   expandFolders,
+  formatAiStatus,
   loadRulesFromFile,
   loadRunRecord,
   saveRulesToFile,
@@ -206,6 +208,23 @@ ipcMain.handle('undo:run', async () => {
   const result = undoLastRun(runRecordFilePath());
   return { result, summary: summarizeLastRun(loadRunRecord(runRecordFilePath())) };
 });
+
+/* ---------------- 换一种分法：AI 分类（本片只搭壳） ----------------
+ * 与 AI 有关的实现只有 core/aiClassify.ts 这一个地方；主进程这里只是「开两个门」：
+ * 一个查状态（界面上那行常显的「AI 分类：未配置」），一个调一次分类。
+ * 门里不做任何加工：界面给一串路径，原样递进去（连「路径 -> 文件元信息」的收口也在它那儿），
+ * 所以「怎么算的」只有一处定义。本片不联网络、不读密钥、不写盘 —— 同样由那个模块保证。
+ */
+ipcMain.handle('ai:status', async () => {
+  return formatAiStatus();
+});
+
+ipcMain.handle(
+  'ai:classify',
+  async (_event, payload: { filePaths?: string[]; outputDir?: string | null }) => {
+    return aiClassifyByPaths(payload?.filePaths ?? [], payload?.outputDir ?? null);
+  },
+);
 
 /** 开工前的输出方向校验（危险就不开工，一个字节都不写）。 */
 ipcMain.handle(

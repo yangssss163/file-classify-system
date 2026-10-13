@@ -11,3 +11,6 @@ export * from './preview';
 export * from './expandAndPlan';
 export * from './outputDirection';
 export * from './runRecord';
+// AI 分类器：本片只搭壳（接口形状 + 未配置时的人话）。**整个产品里与 AI 有关的实现只有这一个文件**，
+// 下一片接真模型时替换它即可；界面/preload 只转调这里导出的东西，不许另写一份。
+export * from './aiClassify';

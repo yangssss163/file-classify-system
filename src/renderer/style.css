@@ -84,3 +84,10 @@ button.primary { font-weight: 600; }
 #undo-report .item.undo-skipped { color: #92400e; }
 #undo-report .item.undo-head { font-weight: 600; color: #1f2937; }
 #undo[disabled] { opacity: 0.6; cursor: not-allowed; }
+
+/* 换一种分法：AI 分类（只加这两小块样式，不做美化） */
+#ai-reclassify[disabled] { opacity: 0.6; cursor: not-allowed; }
+#ai-status { font-weight: 600; }
+#ai-status.ai-ready { color: #1d4ed8; }
+#ai-notice { color: #b45309; min-height: 18px; }
+#ai-notice:empty { display: none; }

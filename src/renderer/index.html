@@ -74,6 +74,15 @@
   <p id="undo-warning" class="danger"></p>
   <div id="undo-report" class="list"></div>
 
+  <h2>换一种分法</h2>
+  <div class="row">
+    <button id="ai-reclassify">换一种分法：AI 分类</button>
+    <span id="ai-status" class="hint">AI 分类：未配置</span>
+  </div>
+  <p class="hint">点了这个按钮会<b>先撤销上一次整理</b>（只删这次复制到输出目录的那份，原文件一个都不会动），
+    再换一种分法重来 —— 另一种分法就是 AI 分类。</p>
+  <p id="ai-notice" class="notice"></p>
+
   <!-- renderer.js 以 ES module 加载：编译产物里没有 CommonJS 的 exports 包装，
      所以不会有 "exports is not defined" 这种启动即崩的问题 -->
 <script type="module" src="renderer.js"></script>

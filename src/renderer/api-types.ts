@@ -355,6 +355,34 @@ export interface RulesSaveResult {
   filePath: string;
 }
 
+/**
+ * 「换一种分法：AI 分类」用到的类型（**核心那份在 src/core/aiClassify.ts，这里是一份界面侧副本**）。
+ * 界面侧单独一份的原因：界面脚本编成 ES module、不许在运行时有导入；这几种形状改动时要两处一起改
+ * （与 `UndoSummary` / `OutputDirectionCheck` 的做法一致）。本片只搭壳，不联网络、不读密钥。
+ * 这里故意用 `AiSeed*` 这套名字：与 AI 实现同名的标识只允许出现在那个模块里（由验收第 12 条盯着）。
+ */
+export interface AiSeedAssignment {
+  /** 原文件路径（绝不改动它） */
+  source: string;
+  /** 分到哪个分类（= 输出里的分类文件夹名） */
+  category: string;
+  confidence: number | null;
+  reason: string;
+}
+
+export type AiSeedClassifyOutcome =
+  | { ok: true; assignments: AiSeedAssignment[]; unclassified: string[]; message: string }
+  | { ok: false; reason: 'not-configured' | 'request-failed' | 'empty-result'; message: string };
+
+/** 界面上那行常显的 AI 状态（「AI 分类：未配置」里的原话由核心模块给，界面照抄）。 */
+export interface AiSeedStatus {
+  configured: boolean;
+  /** 短标签（如「AI 分类：未配置」） */
+  label: string;
+  /** 一句人话（说清现在只有规则分类可用） */
+  message: string;
+}
+
 /** 预加载脚本暴露到 window.organizer 上的那一套方法。 */
 export interface OrganizerApi {
   /** 把拖进来的 File 换成磁盘路径（preload 里用 webUtils.getPathForFile）；取不到给 null */
@@ -392,5 +420,11 @@ export interface OrganizerApi {
     files?: string[] | null;
     outputDir?: string | null;
   }): Promise<OutputDirectionCheck>;
+  /**
+   * 「换一种分法：AI 分类」那两件事的通道（界面只能走这里，界面里不许有第二份 AI 实现）。
+   * 本片只搭壳：不联网络、不读密钥、不写盘。
+   */
+  aiStatus(): Promise<AiSeedStatus>;
+  aiClassify(filePaths: string[], outputDir?: string | null): Promise<AiSeedClassifyOutcome>;
   onProgress(handler: (p: OrganizeProgress) => void): void;
 }

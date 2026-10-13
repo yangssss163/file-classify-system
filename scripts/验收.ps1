@@ -2,7 +2,7 @@
 # 标准由控制台写死，工作台只执行，不修改、不放宽。
 # 跑法：npm run 验收   （= powershell -ExecutionPolicy Bypass -File scripts\验收.ps1）
 #
-# 九条断言（缺一不通过）：
+# 十三条断言（缺一不通过）：
 #   1 纯逻辑测试      accept-logic-test.js    -> 分类逻辑OK
 #   2 真实复制测试    accept-copy-test.js     -> 复制落地OK
 #   3 真程序活着      真启动 electron.exe     -> 窗口活着OK（沙箱 shell 里会被 install_dir_access.cc 拦下，需非沙箱窗口跑）
@@ -26,6 +26,15 @@
 #  11 输出方向        accept-output-direction-test.js -> 输出方向OK（纯逻辑 + 界面接线：
 #     输出=源、输出在源之下、输出是源的上一级 一律不许开工且一个字节都不写；
 #     正常方向允许并真跑一次；散文件只校验「输出 != 文件所在目录」；含「探针有效性自检」）
+#  12 AI 策略壳        accept-ai-strategy-test.js -> AI策略壳OK（纯逻辑，不联网络：
+#     未配置时 isAiConfigured()=false、classifyByAi 回 ok:false + 人话；模块代码体里没有联网标识、没有取密钥的写法；
+#     调用时把全局联网入口换成会抛错的哨兵，调完哨兵没被碰过；不写盘不删东西；接口形状齐全且产品里没有第二处 AI 实现；
+#     含「探针有效性自检」：偷偷塞 fetch / 读环境变量 / 别处另抄一份实现的产物必须判失败）
+#  13 AI 界面壳        accept-ai-ui-test.js -> AI界面壳OK（界面接线，真 ES module 在窗口式桩里真执行：
+#     界面上有常显的「AI 分类：未配置」；点「换一种分法：AI 分类」必须**先撤销、后 AI**（桩里记调用序列）；
+#     撤销成功 + AI 未配置 → 界面说清「已撤销 N 个 + AI 分类还没配置」；真造临时目录验「输出里那份被撤掉、源文件一个没动」；
+#     再点一次只给提示、不删东西、不再调 AI；撤销返回失败 → 不继续调 AI 且如实显示撤销报告；
+#     含「探针有效性自检」：内存里现造的「先调 AI、后撤销」的产物必须判失败）
 #
 # 编码约定：全链路 UTF-8。本脚本与 node 子进程之间按 UTF-8 走，日志也是 UTF-8，
 # 所以看日志别按 GBK 解（那是乱码）。判定逻辑只看退出码 + 日志里的 ASCII 标记，与编码无关。
@@ -58,7 +67,7 @@ function Fail([string]$why) {
 # ---------- 第 1 条：纯逻辑测试（不需要界面） ----------
 $logic = $false
 try {
-  Write-Step '--- 1/9 纯逻辑测试 ---'
+  Write-Step '--- 1/13 纯逻辑测试 ---'
   $outDir = Join-Path $projectRoot 'out'
   New-Item -ItemType Directory -Force -Path $outDir | Out-Null
   $logicTestJs = Join-Path $stage 'accept-logic-test.js'
@@ -79,7 +88,7 @@ try {
 # ---------- 第 2 条：真实复制测试（不需要界面） ----------
 $copy = $false
 try {
-  Write-Step '--- 2/9 真实复制测试 ---'
+  Write-Step '--- 2/13 真实复制测试 ---'
   $caseDir = Join-Path $stage "accept-copy-$stamp"
   $srcDir = Join-Path $caseDir 'src'
   $dstDir = Join-Path $caseDir 'dst'
@@ -116,7 +125,7 @@ try {
 $alive = $false
 $elProc = $null
 try {
-  Write-Step '--- 3/9 真程序活着 ---'
+  Write-Step '--- 3/13 真程序活着 ---'
   $buildLog = Join-Path $stage 'accept-build.log'
   $nodeExe = (Get-Command node).Source
   # 用 node 直接跑 npm-cli.js，避开 npm.cmd 的批处理壳子（壳子会把 stderr 当成本命令失败）
@@ -190,7 +199,7 @@ try {
 # ---------- 第 4 条：预览不落盘（不需要界面） ----------
 $preview = $false
 try {
-  Write-Step '--- 4/9 预览不落盘 ---'
+  Write-Step '--- 4/13 预览不落盘 ---'
   $previewCase = Join-Path $stage "accept-preview-$stamp"
   $previewSrc = Join-Path $previewCase 'src'
   $previewOut = Join-Path $previewCase 'out-empty'
@@ -226,7 +235,7 @@ try {
 # ---------- 第 5 条：拖入取路径（拖进来的文件必须真的进得来） ----------
 $dropPath = $false
 try {
-  Write-Step '--- 5/9 拖入取路径 ---'
+  Write-Step '--- 5/13 拖入取路径 ---'
   $dropTestJs = Join-Path $stage 'accept-drop-path-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-drop-path-test.js') -Destination $dropTestJs -Force
   $dropLog = Join-Path $stage 'accept-drop-path.log'
@@ -249,7 +258,7 @@ try {
 # ---------- 第 6 条：规则引擎（纯逻辑，不依赖界面） ----------
 $ruleEngine = $false
 try {
-  Write-Step '--- 6/9 规则引擎 ---'
+  Write-Step '--- 6/13 规则引擎 ---'
   $ruleTestJs = Join-Path $stage 'accept-rules-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-rules-test.js') -Destination $ruleTestJs -Force
   $ruleLog = Join-Path $stage 'accept-rules.log'
@@ -271,7 +280,7 @@ try {
 # ---------- 第 7 条：规则编辑器（界面接线，不依赖真窗口） ----------
 $ruleEditor = $false
 try {
-  Write-Step '--- 7/9 规则编辑器 ---'
+  Write-Step '--- 7/13 规则编辑器 ---'
   $editorTestJs = Join-Path $stage 'accept-rules-editor-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-rules-editor-test.js') -Destination $editorTestJs -Force
   $editorLog = Join-Path $stage 'accept-rules-editor.log'
@@ -293,7 +302,7 @@ try {
 # ---------- 第 8 条：文件夹各归各（纯逻辑，真造临时目录与文件） ----------
 $folderPlan = $false
 try {
-  Write-Step '--- 8/9 文件夹各归各 ---'
+  Write-Step '--- 8/13 文件夹各归各 ---'
   $folderPlanTestJs = Join-Path $stage 'accept-folder-plan-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-folder-plan-test.js') -Destination $folderPlanTestJs -Force
   $folderPlanLog = Join-Path $stage 'accept-folder-plan.log'
@@ -315,7 +324,7 @@ try {
 # ---------- 第 9 条：文件夹预览（界面接线，不依赖真窗口） ----------
 $folderPreview = $false
 try {
-  Write-Step '--- 9/9 文件夹预览 ---'
+  Write-Step '--- 9/13 文件夹预览 ---'
   $folderPreviewTestJs = Join-Path $stage 'accept-folder-preview-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-folder-preview-test.js') -Destination $folderPreviewTestJs -Force
   $folderPreviewLog = Join-Path $stage 'accept-folder-preview.log'
@@ -341,7 +350,7 @@ try {
 # ---------- 第 10 条：撤销上一次整理（纯逻辑，真造临时目录与文件） ----------
 $undoOk = $false
 try {
-  Write-Step '--- 10/11 撤销上一次整理 ---'
+  Write-Step '--- 10/13 撤销上一次整理 ---'
   $undoTestJs = Join-Path $stage 'accept-undo-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-undo-test.js') -Destination $undoTestJs -Force
   $undoLog = Join-Path $stage 'accept-undo.log'
@@ -364,7 +373,7 @@ try {
 # ---------- 第 11 条：输出方向（纯逻辑 + 界面接线，不依赖真窗口） ----------
 $directionOk = $false
 try {
-  Write-Step '--- 11/11 输出方向 ---'
+  Write-Step '--- 11/13 输出方向 ---'
   $directionTestJs = Join-Path $stage 'accept-output-direction-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-output-direction-test.js') -Destination $directionTestJs -Force
   $directionLog = Join-Path $stage 'accept-output-direction.log'
@@ -384,7 +393,56 @@ try {
   Write-Host "输出方向测试异常：$($_.Exception.Message)"
 }
 
-if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview -and $undoOk -and $directionOk) {
+# ---------- 第 12 条：AI 策略壳（纯逻辑，不联网络） ----------
+$aiStrategyOk = $false
+try {
+  Write-Step '--- 12/13 AI 策略壳 ---'
+  $aiStrategyTestJs = Join-Path $stage 'accept-ai-strategy-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-ai-strategy-test.js') -Destination $aiStrategyTestJs -Force
+  $aiStrategyLog = Join-Path $stage 'accept-ai-strategy.log'
+  # 这条要在 npm run build 之后跑（第 3 条已经跑过 build），脚本会 require out\core\index.js
+  # 并扫 src\core 下那个 AI 分类模块的源码、编译产物与其它产品文件。
+  # 全程不联网络：脚本会把全局联网入口换成会抛错的哨兵，调完之后要求哨兵一个都没被碰过。
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node $aiStrategyTestJs *> $aiStrategyLog
+  $aiStrategyCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $aiStrategyLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "AI策略壳测试退出码=$aiStrategyCode  日志=$aiStrategyLog"
+  if ($aiStrategyCode -eq 0 -and ((Get-Content -LiteralPath $aiStrategyLog -Encoding UTF8 -Raw) -match 'AI策略壳OK')) {
+    Write-Step 'AI策略壳OK'
+    $aiStrategyOk = $true
+  }
+} catch {
+  Write-Host "AI策略壳测试异常：$($_.Exception.Message)"
+}
+
+# ---------- 第 13 条：AI 界面壳（界面接线，真 ES module 在窗口式桩里执行） ----------
+$aiUiOk = $false
+try {
+  Write-Step '--- 13/13 AI 界面壳 ---'
+  $aiUiTestJs = Join-Path $stage 'accept-ai-ui-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-ai-ui-test.js') -Destination $aiUiTestJs -Force
+  $aiUiLog = Join-Path $stage 'accept-ai-ui.log'
+  # 这条要在 npm run build 之后跑（第 3 条已经跑过 build），
+  # 脚本会读 out\renderer\renderer.js / out\preload.js / out\main.js，
+  # 并把界面产物在窗口式桩里真跑一遍，还真的整理一次、真的撤销一次（记录走临时路径）。
+  # --experimental-vm-modules：要用真正的 ES module 作用域，没有它就直接判失败
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node --experimental-vm-modules $aiUiTestJs *> $aiUiLog
+  $aiUiCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $aiUiLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "AI界面壳测试退出码=$aiUiCode  日志=$aiUiLog"
+  if ($aiUiCode -eq 0 -and ((Get-Content -LiteralPath $aiUiLog -Encoding UTF8 -Raw) -match 'AI界面壳OK')) {
+    Write-Step 'AI界面壳OK'
+    $aiUiOk = $true
+  }
+} catch {
+  Write-Host "AI界面壳测试异常：$($_.Exception.Message)"
+}
+
+if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview -and $undoOk -and $directionOk -and $aiStrategyOk -and $aiUiOk) {
   Write-Step '验收通过'
   exit 0
 }
@@ -401,4 +459,6 @@ if (-not $folderPlan) { $failedSteps += '文件夹各归各' }
 if (-not $folderPreview) { $failedSteps += '文件夹预览' }
 if (-not $undoOk) { $failedSteps += '撤销' }
 if (-not $directionOk) { $failedSteps += '输出方向' }
+if (-not $aiStrategyOk) { $failedSteps += 'AI策略壳' }
+if (-not $aiUiOk) { $failedSteps += 'AI界面壳' }
 Fail ($failedSteps -join '+')
