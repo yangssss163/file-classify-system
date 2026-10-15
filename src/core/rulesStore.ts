@@ -8,13 +8,48 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { defaultRules, type Rule, type RuleTable } from './rules';
+import { defaultRules, ruleTargetOf, type Rule, type RuleTable } from './rules';
 
 /** 规则文件的固定文件名（放在 userData 目录下）。 */
 export const RULES_FILE_NAME = 'organizer-rules.json';
 
 /** 规则文件里记录的格式版本，便于以后改动时不误读。 */
 export const RULES_SCHEMA_VERSION = 1;
+
+/**
+ * 一条规则归一化之后的实际目标（界面照着显示，绝不自己再算一份）。
+ * `targetPath` 为空串 = 这条规则的分类名不能用，`reason` 是那句人话。
+ */
+export interface RuleTargetView {
+  /** 规则 id（界面上用来对上行） */
+  id: string;
+  /**
+   * 归一化之后的分类路径（多级就是 `照片\风光`）；不能用时为空串。
+   * 名字不叫 `path`：「界面产物里不许出现 `.path` 这种属性读法」是拖入取路径那一片传下来的纪律
+   * （那是 Electron 32 起被移除的 `File.path` 的写法），所以这里用一个更明确的名字。
+   */
+  targetPath: string;
+  /** 各层文件夹名（单层一项） */
+  segments: string[];
+  /** 不能用时的人话原因；能用时为空串 */
+  reason: string;
+}
+
+/** 规则表 → 每条规则的「实际目标」（归一化只有 rules.ts 那一处实现）。 */
+export function ruleTargetsOf(rules: RuleTable | null | undefined): RuleTargetView[] {
+  return Array.from(rules ?? []).map((rule) => {
+    const target = ruleTargetOf(rule);
+    return { id: String(rule?.id ?? ''), targetPath: target.path, segments: target.segments.slice(), reason: target.reason };
+  });
+}
+
+/**
+ * 读规则时顺手把「每条规则实际会建到哪儿」一起算出来给界面。
+ * 为什么一起给：界面要在规则行上显示归一化后的实际目标，而规则一整批地来；分开取会有一段时间显示不上。
+ */
+export function rulesViewOf(result: RulesLoadResult): RulesLoadResult {
+  return { ...result, targets: ruleTargetsOf(result.rules) };
+}
 
 /** 保存/加载的结果：`ok=false` 时 `rules` 一定是可用的默认规则。 */
 export interface RulesLoadResult {
@@ -27,6 +62,8 @@ export interface RulesLoadResult {
   message: string;
   /** 规则文件路径 */
   filePath: string;
+  /** 每条规则归一化之后的实际目标（界面在规则行上显示；按 id 对得上） */
+  targets?: RuleTargetView[];
 }
 
 export interface RulesSaveResult {

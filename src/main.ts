@@ -22,6 +22,8 @@ import {
   loadRunRecord,
   saveAiConfig,
   saveRulesToFile,
+  ruleTargetsOf,
+  rulesViewOf,
   setSourceRoots,
   testAiConnection,
   undoLastRun,
@@ -197,7 +199,8 @@ function rulesFilePath(): string {
 }
 
 ipcMain.handle('rules:load', async () => {
-  return loadRulesFromFile(rulesFilePath());
+  // 顺手把「每条规则实际会建到哪儿（归一化之后）」一起给界面：规则行上要显示它。
+  return rulesViewOf(loadRulesFromFile(rulesFilePath()));
 });
 
 ipcMain.handle('rules:save', async (_event, rules: Rule[]) => {
@@ -205,6 +208,15 @@ ipcMain.handle('rules:save', async (_event, rules: Rule[]) => {
 });
 
 ipcMain.handle('rules:path', async (): Promise<string> => rulesFilePath());
+
+/**
+ * 规则行上要显示的那句「归一化之后实际会建到哪儿」（本片新增：分类名允许写多级）。
+ * 归一化只有一处实现（core 的 rules.ts），界面照抄这里的结论 —— 界面绝不自己再算一份，
+ * 免得「界面显示的目标」与「实际落盘的目标」是两套。
+ */
+ipcMain.handle('rules:targets', async (_event, rules: Rule[]) => {
+  return ruleTargetsOf(rules ?? []);
+});
 
 /* ---------------- 上一次整理的记录 / 撤销（本片新增） ----------------
  * 记录放在 userData 下的 organizer-last-run.json，**跨重启可用**（关掉程序再打开，仍能撤销上一次整理）。

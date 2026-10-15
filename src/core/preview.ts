@@ -7,16 +7,17 @@
  */
 import * as fssync from 'fs';
 import { baseName, extensionOf } from './classify';
-import { activeFolderNamesOf, type RuleTable } from './rules';
-import { classifyWithMeta } from './classifyWithMeta';
+import { activeFolderNamesOf, type RuleTable } from './rules';import { classifyWithMeta } from './classifyWithMeta';
 import { describeError } from './copyFiles';
 import { checkOutputDirection, type OutputDirectionCheck } from './outputDirection';
 import {
   countKeptOf,
   FOLDER_KEEP_HINT,
   planFolders,
+  type PlannedFile,
   type PlanResult,
   type PlannedFolder,
+  targetDirOf,
   type ScanNode,
   type SkippedPath,
 } from './expandAndPlan';
@@ -47,12 +48,40 @@ export interface PreviewFile {
 
 /** 预览树里的一个分类文件夹。 */
 export interface PreviewFolder {
-  /** 分类文件夹名（与真正复制时用的完全一致） */
+  /**
+   * 这一层的目录名（**一段**，不含分隔符）。
+   * `PreviewCategoryFolder` 用的也是这个名字，所以两种形状可以直接互相嵌套。
+   */
   folder: string;
   /** 该文件夹下的文件个数 */
   count: number;
   /** 该文件夹下的文件明细 */
   files: PreviewFile[];
+  /**
+   * 多层分类名的**下一层**（本片新增）：`照片\风光` 这条规则在预览里要能看出
+   * 「`照片` 下面还有一层 `风光`」，而不是把一个带分隔符的名字当成一个目录名。
+   * 单层分类名（既有行为）这里是空数组。
+   */
+  children: PreviewFolder[];
+}
+
+/** 预览里「多层分类名」逐层展开出来的一个目录节点：与 `PreviewFolder` 是**同一套形状**，所以可以直接嵌套。 */
+export type PreviewCategoryFolder = PreviewFolder;
+
+/** 一层分类路径的显示记录（`tree.folders` 用；单层就是一项，多级就是这条路径上最短的那一层）。 */
+export interface PreviewFolderGroup {
+  /** 分类文件夹名（多级时是这条路径上「最短的那一层」，例如 `照片\风光` 记成 `照片`） */
+  folder: string;
+  /** 这一层（含下面各层）的文件个数 */
+  count: number;
+  /** 这一层（含下面各层）的文件明细 */
+  files: PreviewFile[];
+  /** 这条路径的完整写法（`照片\风光`）；单层时与 `folder` 相同 */
+  fullPath: string;
+  /** 这条路径全部各层（`['照片','风光']`） */
+  segments: string[];
+  /** 下一层 */
+  children: PreviewFolderGroup[];
 }
 
 /**
@@ -89,8 +118,14 @@ export interface PreviewSourceFolder {
   classifiedCount: number;
   /** 是不是因为「同段路径里有同名文件夹」改过名 */
   renamed: boolean;
-  /** 这一层根下散文件按规则**新建**的分类夹（空分类不列） */
+  /** 这一层根下散文件按规则**新建**的分类夹（空分类不列；`folder` 是完整分类路径） */
   categories: PreviewFolder[];
+  /**
+   * 上面那些分类夹按**多层路径**逐层展开出来的结构（本片新增）：
+   * 规则写 `照片\风光` 时这里是 `照片` 一层、下面再挂 `风光` 一层 —— 与磁盘上的目录一一对应。
+   * 单层分类名（既有行为）这里就是一层。
+   */
+  categoryTree: PreviewCategoryFolder[];
   /** 沉进这一份的散文件（只有子文件夹那几层才有；顶层为空） */
   mergedIn: PreviewFile[];
   /** 这些沉进来的散文件各自沉了几层（与 `mergedIn` 一一对应） */
@@ -127,8 +162,8 @@ export interface PreviewSubFolder {
 export interface PreviewRoot {
   /** 顶层源文件夹名 */
   name: string;
-  /** 顶层源文件夹路径 */
-  path: string;
+  /** 顶层源文件夹完整路径（字段名不叫 `path`：界面产物里不许出现 `.path` 那种属性读法） */
+  sourcePath: string;
   /** 输出里的顶层名字（同名不覆盖时可能被改成「备份 (2)」） */
   outputName: string;
   /** 是不是因为「另一个同名顶层源文件夹」改过名 */
@@ -141,11 +176,14 @@ export interface PreviewRoot {
   total: number;
 }
 
-/** 一棵分类预览树：每个分类一行（名字 + 数量），展开是文件名。 */
+/** 一棵分类预览树：每个分类一行（名字 + 数量），展开是文件名；多级分类名往 `children` 里挂。 */
 export interface PreviewTree {
   /** 输入的文件总数 */
   total: number;
-  /** 按固定分类顺序排列的分类节点（没有文件的分类也在，count 为 0） */
+  /**
+   * 按分类**路径**排好的分组（多级规则逐层往下挂）：`照片\风光` 是「`照片` → `风光`」两层，
+   * 与磁盘上会建出来的目录一一对应；单层规则还是一行。
+   */
   folders: PreviewFolder[];
   /** 每个分类的文件数（分类名 → 个数） */
   counts: Record<string, number>;
@@ -294,9 +332,9 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
   const checkReadable = options?.checkReadable !== false;
   const rules = options?.rules ?? null;
   // 分类：与真正执行复制时**同一个求值函数**（大小/时间条件要真读属性）
+  // 明细汇总（`entries`）顺序与输入一致，便于「预览 vs 实际」逐条核对；
+  // 顶层那份「按分类汇总」由 `buildCategoryTree()` 按分类**路径**逐层搭出来（见下）。
   const entries: PreviewFile[] = [];
-  const byFolder = new Map<string, PreviewFile[]>();
-  for (const folder of activeFolderNamesOf(rules)) byFolder.set(folder, []);
 
   let plan: PlanResult | null = null;
   let tree: ScanNode[] = [];
@@ -307,16 +345,6 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
     plan = outcome.plan;
     tree = outcome.tree;
   }
-
-  const pushInto = (folder: string, item: PreviewFile): void => {
-    entries.push(item);
-    let bucket = byFolder.get(folder);
-    if (!bucket) {
-      bucket = [];
-      byFolder.set(folder, bucket);
-    }
-    bucket.push(item);
-  };
 
   /** 文件 → 预览条目（分类一律来自规则求值，与执行时同一个函数）。 */
   const previewItemOf = (filePath: string, folder: string): PreviewFile => {
@@ -331,36 +359,104 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
     };
   };
 
+  // 明细汇总（`entries`）顺序与输入一致，便于「预览 vs 实际」逐条核对。
+  // 这一份汇总里的，正是「会进分类夹」的那些文件：
+  //  - 拖入了文件夹：只算**按规则分类的散文件**（子文件夹里的是原样保留的，不进任何分类夹）；
+  //  - 只是一堆散文件：每个文件都按规则分类（既有行为）。
+  const plannedFiles = tracked && plan ? plan.files : [];
   if (tracked && plan) {
-    // 顶部那份「按分类汇总」：只列**按规则分类的散文件**
-    // （子文件夹里的是原样保留的，不进任何分类夹，所以不列在这里）
-    for (const f of plan.files) {
-      if (f.placement === 'classify') {
-        const category = f.category ?? '';
-        pushInto(category, previewItemOf(f.fullPath, category));
-      }
+    for (const f of plannedFiles) {
+      if (f.placement === 'classify') entries.push(previewItemOf(f.fullPath, f.category ?? ''));
     }
   } else {
     for (const raw of files) {
       const p = String(raw);
       const matched = classifyWithMeta(rules, p);
-      pushInto(matched.folder, previewItemOf(p, matched.folder));
+      entries.push(previewItemOf(p, matched.folder));
     }
   }
 
   // 这一次的文件总数与三种去处的个数（原样保留的也算总数，只是不进分类夹）
-  const plannedFiles = tracked && plan ? plan.files : [];
   const classifyCount = tracked && plan ? plannedFiles.filter((f) => f.placement === 'classify').length : entries.length;
   const keepCount = tracked && plan ? plannedFiles.filter((f) => f.placement === 'keep').length : 0;
   const mergeCount = tracked && plan ? plannedFiles.filter((f) => f.placement === 'merge').length : 0;
   const totalCount = tracked && plan ? plannedFiles.length : entries.length;
 
-  const folders: PreviewFolder[] = [];
+  // 多层分类名的逐层展开：`照片\风光` 在预览里必须是「`照片` 下面还有一层 `风光`」。
+  // 数据源就是这份计划里每个文件的 `targetDir`（`C:\…\照片\风光` 这种每段都真存在的目录链），
+  // 所以预览说的结构必然与落盘的结构一致。
+  const dirsUnder = (dir: string, base: string): string[] => {
+    const d = String(dir ?? '');
+    const b = String(base ?? '').replace(/[\\/]+$/, '');
+    if (b.length === 0) return [d];
+    const lowerD = d.toLowerCase();
+    if (lowerD === b.toLowerCase()) return [];
+    let rest = d.slice(b.length);
+    while (rest.startsWith('\\') || rest.startsWith('/')) rest = rest.slice(1);
+    return rest.length === 0 ? [] : rest.split(/[\\/]+/).filter((s) => s.length > 0);
+  };
+
+  /**
+   * 一组文件所在的分类路径 → 各层名字（从「这一层」往下数）。
+   * 优先用文件真正要落进去的那条目录链（`targetDir` 相对「这一层」的那一段），
+   * 所以预览画的层数与落盘的层数必然一致；取不到就退回按规则名切分。
+   */
+  const categorySegmentsOf2 = (category: string, files: readonly PlannedFile[], base: string): string[] => {
+    const first = files[0];
+    if (first && first.targetDir) {
+      const segs = dirsUnder(first.targetDir, base);
+      if (segs.length > 0) return segs;
+    }
+    return categorySegmentsOf(category);
+  };
+
+  /** 一组「按规则分类的散文件」（同一分类路径的）→ 预览条目。 */
+  const categoryEntriesOfFiles = (
+    list: readonly PlannedFile[],
+    baseOf: (f: PlannedFile) => string,
+  ): Array<{ segments: string[]; files: PreviewFile[] }> => {
+    const byCategory = new Map<string, { files: PlannedFile[]; base: string }>();
+    for (const f of list) {
+      const key = String(f.category ?? '');
+      const bucket = byCategory.get(key);
+      if (bucket) bucket.files.push(f);
+      else byCategory.set(key, { files: [f], base: baseOf(f) });
+    }
+    const out: Array<{ segments: string[]; files: PreviewFile[] }> = [];
+    for (const [category, group] of byCategory) {
+      out.push({
+        segments: categorySegmentsOf2(category, group.files, group.base),
+        files: group.files.map((f) => previewItemOf(f.fullPath, category)),
+      });
+    }
+    return out;
+  };
+
+  /** 某个文件所在的那一层在输出里的目录（各层名字就是从它下面数出来的）。 */
+  const layerOutputDirOf = (f: PlannedFile): string =>
+    targetDirOf(String(outputDir), [f.origin.rootName, ...(f.origin.chain ?? [])]);
+
+  const categoryEntriesOf = (planned: PlannedFolder): Array<{ segments: string[]; files: PreviewFile[] }> =>
+    categoryEntriesOfFiles(
+      planned.categories.flatMap((g) => g.files.map((f) => ({ ...f, category: g.category }))),
+      () => planned.outputDir,
+    );
+
+  /**
+   * 顶部那份「按分类汇总」：与每一份源文件夹里的树用同一套数据源（`plan` / 规则求值），
+   * 多级分类名逐层往下挂 —— 与磁盘上的目录结构一一对应，不是把 `照片\风光` 当成一个名字。
+   */
+  const topEntries: Array<{ segments: string[]; files: PreviewFile[] }> = tracked && plan
+    ? categoryEntriesOfFiles(
+        plannedFiles.filter((f) => f.placement === 'classify'),
+        layerOutputDirOf,
+      )
+    : entries.map((f) => ({ segments: categorySegmentsOf(f.folder), files: [f] }));
+  const topTree = buildCategoryTree(topEntries);
+
+  const folders: PreviewFolder[] = topTree.roots.slice();
   const counts: Record<string, number> = {};
-  for (const [folder, list] of byFolder) {
-    folders.push({ folder, count: list.length, files: list });
-    counts[folder] = list.length;
-  }
+  for (const node of folders) counts[node.folder] = node.count;
 
   // 按源文件夹分组（每一份各归各）：份内再分「原样保留的子树（含并入的散文件）」与「按规则新建的分类夹」
   const rootsOut: PreviewRoot[] = [];
@@ -384,7 +480,10 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
         folder: g.category,
         count: g.files.length,
         files: g.files.map((f) => previewItemOf(f.fullPath, g.category)),
+        // 单层分类名没有下一层；多级的下一层由 `categoryTree` 给（这里保持「一行一条规则」的语义）
+        children: [],
       })),
+      categoryTree: buildCategoryTree(categoryEntriesOf(planned)).roots,
       mergedIn: planned.mergedInto.map((f) => previewItemOf(f.fullPath, '')),
       // 沉了几层 = 它停下的那一层的层数 − 它原来所在那一层的层数
       sunkDepth: planned.mergedInto.map((f) =>
@@ -414,7 +513,7 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
       sourceFolderCount += 1 + countNodes(root.subtree.subfolders);
       rootsOut.push({
         name: root.origin.rootName,
-        path: root.origin.rootPath,
+        sourcePath: root.origin.rootPath,
         outputName: root.outputName,
         renamed: root.renamed,
         self: makeSourceFolder(root.subtree),
@@ -452,6 +551,72 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
       }),
     },
   };
+}
+
+/**
+ * 多层分类名逐层展开成树（纯内存）。**只有一套节点形状**（`PreviewFolder`），
+ * 所以「顶层汇总」与「每个源文件夹那一份」显示出来的层数必然一致。
+ * - 每一项的 `segments` 是一条分类路径的各层（`照片\风光` → `['照片','风光']`）；
+ * - **中间层也会被建出来**（这正是「不是把 `照片\风光` 当成一个目录名」的那条）；
+ * - 文件的 `folder` 一律记成**完整分类路径**（与真正复制时用的值一致，便于逐条核对）；
+ * - 一个文件都没有的路径不列出来（预览只说真会建的东西）。
+ */
+function buildCategoryTree(
+  entries: ReadonlyArray<{ segments: string[]; files: PreviewFile[] }>,
+): { roots: PreviewFolder[]; nodesByDepth: Map<string, PreviewFolder> } {
+  const roots: PreviewFolder[] = [];
+  /** 路径（`照片\风光`）→ 这一层的节点，便于把文件挂到最深处。 */
+  const nodesByDepth = new Map<string, PreviewFolder>();
+
+  /** 把这一条路径逐层建出来，返回最深的那个节点（含中间层）。 */
+  const ensureNode = (parts: readonly string[]): PreviewFolder | null => {
+    let list = roots;
+    let pathSoFar = '';
+    let node: PreviewFolder | null = null;
+    for (const seg of parts) {
+      pathSoFar = pathSoFar.length === 0 ? seg : `${pathSoFar}\\${seg}`;
+      let cur = list.find((n) => n.folder === seg);
+      if (!cur) {
+        cur = { folder: seg, count: 0, files: [], children: [] };
+        list.push(cur);
+      }
+      nodesByDepth.set(pathSoFar, cur);
+      list = cur.children;
+      node = cur;
+    }
+    return node;
+  };
+
+  for (const entry of entries) {
+    if (entry.segments.length === 0) continue;
+    const node = ensureNode(entry.segments);
+    if (node) node.files.push(...entry.files);
+  }
+
+  // 一个文件都没有的路径不列：预览只说真会建的东西（中间层只要下面有东西就留着）。
+  const prune = (list: PreviewFolder[]): PreviewFolder[] => {
+    for (const node of list) node.children = prune(node.children);
+    return list.filter((node) => node.files.length > 0 || node.children.length > 0);
+  };
+  const kept = prune(roots);
+
+  // 汇总个数：每一层 = 自己目录里的 + 各层子树里的
+  const countOf = (node: PreviewFolder): number => {
+    let n = node.files.length;
+    for (const child of node.children) n += countOf(child);
+    node.count = n;
+    return n;
+  };
+  for (const node of kept) countOf(node);
+
+  return { roots: kept, nodesByDepth };
+}
+
+/** 把一条分类路径（`照片\风光`）切成各层（`['照片','风光']`）。 */
+function categorySegmentsOf(folder: string): string[] {
+  return String(folder ?? '')
+    .split(/[\\/]+/)
+    .filter((s) => s.length > 0);
 }
 
 /** 源文件夹的完整路径。 */

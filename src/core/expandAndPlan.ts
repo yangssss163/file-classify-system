@@ -616,7 +616,17 @@ export function buildPlan(options: PlanOptions): PlanResult {
     allowClassify: boolean,
   ): void => {
     const stem = splitFileName(file.name).stem;
-    const categoryName = classifyWithMeta(rules, file.fullPath, file.name).folder;
+    // 规则求值：`matched.folder` 已是**归一化之后**的分类路径（可以有多级：`照片\风光`）。
+    // `matched.invalidReason` 非空 = 规则名危险（绝对路径 / `..` / 非法字符…）→ 这个文件落到兜底分类，
+    // 并把那句人话原因带上；**绝不**按危险名字建目录。
+    const matched = classifyWithMeta(rules, file.fullPath, file.name);
+    const categoryName = matched.folder;
+    /** 按规则新建的分类夹目录（多级就是「这一层 + 各层名字」拼出来的那条路径）。 */
+    const categoryDir = joinedPath(outputDirPath, categoryName);
+    const categoryReason =
+      matched.invalidReason.length > 0
+        ? `规则算出来的分类名不能用，所以按兜底分类「${categoryName}」走：${matched.invalidReason}`
+        : '';
     const depthCap = MAX_SCAN_DEPTH;
 
     interface SinkStep {
@@ -700,8 +710,9 @@ export function buildPlan(options: PlanOptions): PlanResult {
         top.keptFileCount++;
         return;
       }
-      // 顶层源文件夹的散文件，没得可沉 → 按规则新建分类夹（既有行为）
+      // 顶层源文件夹的散文件，没得可沉 → 按规则新建分类夹（既有行为；分类名可以有多级）
       let reason = `这一层没有和它同名的子文件夹，没得可沉；按规则算出来是「${categoryName}」，新建分类夹`;
+      if (categoryReason.length > 0) reason = `这一层没有和它同名的子文件夹，没得可沉；${categoryReason}`;
       // 同名位置被一个**文件**占着（或规则分类夹名被一个文件占着）→ 说明一下，不许覆盖它
       for (const name of [stem, categoryName]) {
         if (name.length === 0) continue;
@@ -715,7 +726,6 @@ export function buildPlan(options: PlanOptions): PlanResult {
           /* 没有这个东西，属正常 */
         }
       }
-      const categoryDir = joinedPath(outputDirPath, categoryName);
       const placed = placeName(categoryDir, file.name);
       const entry: PlannedFile = {
         fullPath: file.fullPath,
@@ -731,7 +741,7 @@ export function buildPlan(options: PlanOptions): PlanResult {
       files.push(entry);
       top.looseFileCount++;
       top.classifiedCount++;
-      let bucket = top.categories.find((c) => c.category === categoryName);
+      let bucket = top.categories.find((c) => c.category === categoryDir);
       if (!bucket) {
         bucket = { category: categoryName, files: [] };
         top.categories.push(bucket);
@@ -778,7 +788,6 @@ export function buildPlan(options: PlanOptions): PlanResult {
       return;
     }
     if (startHasSameFile && allowClassify) {
-      const categoryDir = joinedPath(outputDirPath, categoryName);
       const placed = placeName(categoryDir, file.name);
       const entry: PlannedFile = {
         fullPath: file.fullPath,
@@ -788,13 +797,15 @@ export function buildPlan(options: PlanOptions): PlanResult {
         placement: 'classify',
         category: categoryName,
         originChain: node.origin.chain.slice(),
-        mergeReason: `这一层有个同名的「文件」占着 ${stem} 这个名字，没有动它；按规则新建分类夹 ${categoryName}\\`,
+        mergeReason:
+          `这一层有个同名的「文件」占着 ${stem} 这个名字，没有动它；按规则新建分类夹 ${categoryName}\\` +
+          (categoryReason.length > 0 ? `；${categoryReason}` : ''),
         renamed: placed.renamed,
       };
       files.push(entry);
       top.looseFileCount++;
       top.classifiedCount++;
-      let bucket = top.categories.find((c) => c.category === categoryName);
+      let bucket = top.categories.find((c) => c.category === categoryDir);
       if (!bucket) {
         bucket = { category: categoryName, files: [] };
         top.categories.push(bucket);

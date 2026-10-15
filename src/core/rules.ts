@@ -84,12 +84,167 @@ export interface FileInfo {
 export interface RuleMatch {
   /** 命中的规则；一条都没命中时为 null（此时 folder = 兜底分类） */
   rule: Rule | null;
-  /** 目标分类文件夹名（兜底时为 FALLBACK_FOLDER） */
+  /**
+   * 目标分类文件夹（相对**这一层**的路径；兜底时为 FALLBACK_FOLDER）。
+   * 规则名里写 `照片\风光` 就是 `照片\风光`（多级：逐层建目录），只写 `01_图片` 就是一层。
+   */
   folder: string;
   /** 命中的规则在规则表里的下标；没命中 = -1 */
   index: number;
   /** 是否走的是兜底分类 */
   fallback: boolean;
+  /** 归一化之后的各层文件夹名（单层规则就是一项；兜底时是 [FALLBACK_FOLDER]） */
+  segments: string[];
+  /**
+   * 规则名因为危险而**被拒绝**时的那句人话原因（安全时是空串）。
+   * 被拒绝的文件一律落到兜底分类，绝不许写到源文件夹树外面去。
+   */
+  invalidReason: string;
+}
+
+/* ------------------------------------------------------------------ *
+ * 分类名的归一化（本片新增：分类名允许是「相对这一层的多级路径」）
+ * ------------------------------------------------------------------ *
+ * 用户写 `照片\风光` 就是「这一层下面先建 照片、再建 风光」；只写 `01_图片` 与现在**完全一致**（一层）。
+ * `\` 与 `/` 都算分隔符（Windows 语义，两者等价）。
+ *
+ * 安全底线：分类名**只许是相对这一层的多级目录**，绝不许把文件写到源文件夹树外面去。
+ * 所以下面这些一律**拒绝**（不是偷偷改一改），并且给人一句人话原因：
+ *   · 绝对路径（`C:\x`、`\\server\share`）、驱动器相对写法（`C:x`）、UNC 前缀（`\\?\`）；
+ *   · `..` 向上跳出（任何一层都不许）；
+ *   · 空层名（`照片\\风光`、`照片\` 结尾的写法由下面的归一化当一层处理，不算空层）；
+ *   · Windows 非法字符 `< > : " | ? *`；
+ *   · 结尾空格 / 结尾点（Windows 建不出这种目录，建出来的名字也会跟写的不是一回事）；
+ *   · 保留设备名（`CON`、`NUL`、`COM1`、`LPT9`…，含 `CON.txt` 这种带后缀的写法）。
+ * 拒绝之后由调用方**回落兜底分类**，所以「写了个危险名字」不会静默变样，而是明确落到「05_其他」并能看到原因。
+ */
+
+/** 解析结果：`segments` 为空 = 拒绝，`reason` 给一句人话。 */
+export interface RulePathParse {
+  /** 归一化之后的各层文件夹名（不含分隔符） */
+  segments: string[];
+  /** 用 `\` 拼回去的那种写法（界面显示用，一眼看出实际会建几层） */
+  cleanName: string;
+  /** 被拒绝时的人话原因；通过时是空串 */
+  reason: string;
+}
+
+/** 危险/不可用的分类名 → 一句人话（只有这一处写原因，不许在别处再写一份）。 */
+const RESERVED_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
+function parseRulePath(text: string): RulePathParse {
+  // 注意：这里**不 trim**。理由：分类名开头/结尾的空格与结尾的点会让「写出来的名字」与
+  // 「Windows 真正建出来的目录名」不是一回事（尾部空格/点会被系统吃掉），属于必须拦住的情形。
+  // 想让中间的空格留着就留着（`我的 照片` 是合法目录名），只把「头尾」这些不安全的挡下来。
+  const raw = String(text ?? '');
+  if (raw.trim().length === 0) {
+    return { segments: [], cleanName: '', reason: '这条规则的分类名是空的（写个名字，或用「照片\\风光」这种多级写法）' };
+  }
+  if (/^\s/.test(raw) || /\s$/.test(raw)) {
+    return {
+      segments: [],
+      cleanName: '',
+      reason: `分类名「${raw}」的开头或结尾有空格：Windows 会把这种文件夹名的头尾空格吃掉，写出来的名字与实际建出来的不是一回事，所以拒绝这条规则（这个文件按兜底分类「${FOLDER_OTHERS}」走）`,
+    };
+  }
+
+  // `\` 与 `/` 都算分隔符：统一按两者切，逐层判。
+  // 开头的分隔符（`\照片`）与结尾的分隔符（`照片\`）不算「空的一层」——`照片\` 与 `照片` 等价；
+  // 中间的空层（`照片\\风光`）才是问题：那一层没有名字，说明写法有误，一律拒绝。
+  const parts = raw.split(/[\\/]+/);
+  while (parts.length > 0 && parts[0].length === 0) parts.shift();
+  while (parts.length > 0 && parts[parts.length - 1].length === 0) parts.pop();
+  const segments: string[] = [];
+  for (const part of parts) {
+    const seg = String(part ?? '').trim();
+    if (seg.length === 0) {
+      return { segments: [], cleanName: '', reason: `分类名「${raw}」里有空的一层（多层写法是「照片\\风光」，别写「照片\\\\风光」）` };
+    }
+    if (seg === '.' || /^\.+$/.test(seg)) {
+      return { segments: [], cleanName: '', reason: `分类名「${raw}」里有「${seg}」这一层，它指的不是一个真的文件夹名` };
+    }
+    if (seg === '..') {
+      return {
+        segments: [],
+        cleanName: '',
+        reason: `分类名「${raw}」里有「..」想往上跳出这一层：这样可能把文件写到源文件夹树外面去，所以拒绝这条规则（这个文件按兜底分类「${FOLDER_OTHERS}」走）`,
+      };
+    }
+    if (seg.endsWith(' ') || seg.endsWith('.')) {
+      return {
+        segments: [],
+        cleanName: '',
+        reason: `分类名「${raw}」里的「${seg}」以空格或点结尾：Windows 建不出这种文件夹名，所以拒绝这条规则（这个文件按兜底分类「${FOLDER_OTHERS}」走）`,
+      };
+    }
+    const bad = seg.match(/[<>:"|?*]/);
+    if (bad) {
+      return {
+        segments: [],
+        cleanName: '',
+        reason: `分类名「${raw}」里的「${seg}」含 Windows 不允许的字符「${bad[0]}」，所以拒绝这条规则（这个文件按兜底分类「${FOLDER_OTHERS}」走）`,
+      };
+    }
+    if (RESERVED_DEVICE_NAME.test(seg)) {
+      return {
+        segments: [],
+        cleanName: '',
+        reason: `分类名「${raw}」里的「${seg}」是 Windows 保留的设备名，不能当文件夹名，所以拒绝这条规则（这个文件按兜底分类「${FOLDER_OTHERS}」走）`,
+      };
+    }
+    segments.push(seg);
+  }
+
+  // 绝对路径 / 驱动器号 / UNC：即使逐层都安全，只要开头是这些写法也一律拒绝
+  // （`C:\x` 的第一层是 `C:`，已被非法字符拦下；这里再兜一道，把 `C:x`、`\\server\share` 这类也拦掉）。
+  if (raw.startsWith('\\\\') || raw.startsWith('//')) {
+    return {
+      segments: [],
+      cleanName: '',
+      reason: `分类名「${raw}」看起来是绝对路径或 UNC 路径：分类名只能是「相对这一层的多级目录」，所以拒绝这条规则（这个文件按兜底分类「${FOLDER_OTHERS}」走）`,
+    };
+  }
+  const first = segments[0] ?? '';
+  if (/^[A-Za-z]:/.test(first) || /^[A-Za-z]:/.test(raw)) {
+    return {
+      segments: [],
+      cleanName: '',
+      reason: `分类名「${raw}」以驱动器号开头（看起来是绝对路径）：分类名只能是「相对这一层的多级目录」，所以拒绝这条规则（这个文件按兜底分类「${FOLDER_OTHERS}」走）`,
+    };
+  }
+
+  return { segments, cleanName: segments.join('\\'), reason: '' };
+}
+
+/**
+ * 归一化一个分类名（纯函数，不碰磁盘）。
+ * @returns `ok:true` 时 `segments` 是各层文件夹名、`path` 是用 `\` 拼好的相对路径；
+ *          `ok:false` 时 `path` 与 `segments` 都是空的，`reason` 说清为什么拒绝。
+ */
+export function normalizeCategoryPath(text: string): { ok: boolean; path: string; segments: string[]; reason: string } {
+  const parsed = parseRulePath(text);
+  if (parsed.segments.length === 0) return { ok: false, path: '', segments: [], reason: parsed.reason };
+  return { ok: true, path: parsed.cleanName, segments: parsed.segments.slice(), reason: '' };
+}
+
+/** 归一化之后的分类名（用 `\` 拼；不含分隔符时原样返回）。危险的规则名返回空串。 */
+export function categoryFolderNameOf(text: string): string {
+  const parsed = parseRulePath(text);
+  return parsed.segments.length === 0 ? '' : parsed.cleanName;
+}
+
+/** 分类名被拒绝时的人话原因（安全时是空串）。 */
+export function categoryInvalidReasonOf(text: string): string {
+  return parseRulePath(text).reason;
+}
+
+/** 求值实际用的那一份：规则名 → 归一化后的分类路径 + 拒绝原因。 */
+function resolveRuleFolder(rule: Rule | null | undefined): { folder: string; segments: string[]; invalidReason: string } {
+  const parsed = parseRulePath(String(rule?.name ?? ''));
+  if (parsed.segments.length === 0) {
+    return { folder: FALLBACK_FOLDER, segments: [FALLBACK_FOLDER], invalidReason: parsed.reason };
+  }
+  return { folder: parsed.cleanName, segments: parsed.segments.slice(), invalidReason: '' };
 }
 
 /* ------------------------------------------------------------------ *
@@ -233,10 +388,25 @@ export function matchRule(table: RuleTable | null | undefined, info: FileInfo): 
   for (let i = 0; i < rules.length; i++) {
     const rule = rules[i];
     if (matchesRule(rule, info)) {
-      return { rule, folder: rule.name, index: i, fallback: false };
+      const resolved = resolveRuleFolder(rule);
+      return {
+        rule,
+        folder: resolved.folder,
+        index: i,
+        fallback: false,
+        segments: resolved.segments,
+        invalidReason: resolved.invalidReason,
+      };
     }
   }
-  return { rule: null, folder: FALLBACK_FOLDER, index: -1, fallback: true };
+  return {
+    rule: null,
+    folder: FALLBACK_FOLDER,
+    index: -1,
+    fallback: true,
+    segments: [FALLBACK_FOLDER],
+    invalidReason: '',
+  };
 }
 
 /**
@@ -247,12 +417,16 @@ export function evaluateFile(table: RuleTable | null | undefined, info: FileInfo
   return matchRule(table, info).folder;
 }
 
-/** 规则表里会出现哪些分类文件夹（按规则顺序 + 兜底分类；停用的规则名也留着，便于界面显示）。 */
+/**
+ * 规则表里会出现哪些分类文件夹（按规则顺序 + 兜底分类；停用的规则名也留着，便于界面显示）。
+ * 名字一律**归一化之后**再列：`照片/风光` 与 `照片\风光` 是同一个目标，只列一次；
+ * 危险的规则名（绝对路径、`..`、非法字符…）列不出来 —— 它的文件会落到兜底分类，`matchRule` 会给人话原因。
+ */
 export function folderNamesOf(table: RuleTable | null | undefined): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const rule of table ?? []) {
-    const name = String(rule?.name ?? '').trim();
+    const name = categoryFolderNameOf(String(rule?.name ?? ''));
     if (name.length === 0 || seen.has(name)) continue;
     seen.add(name);
     out.push(name);
@@ -261,17 +435,23 @@ export function folderNamesOf(table: RuleTable | null | undefined): string[] {
   return out;
 }
 
-/** 预览/执行真正用得到的文件夹（停用的规则不算）。 */
+/** 预览/执行真正用得到的文件夹（停用的规则不算）。名字同样归一化之后再列。 */
 export function activeFolderNamesOf(table: RuleTable | null | undefined): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const rule of table ?? []) {
     if (!rule || rule.enabled === false) continue;
-    const name = String(rule.name ?? '').trim();
+    const name = categoryFolderNameOf(String(rule.name ?? ''));
     if (name.length === 0 || seen.has(name)) continue;
     seen.add(name);
     out.push(name);
   }
   if (!seen.has(FALLBACK_FOLDER)) out.push(FALLBACK_FOLDER);
   return out;
+}
+
+/** 一条规则归一化之后的实际目标（界面显示用：一眼看出 `照片\风光` 会建两层）。 */
+export function ruleTargetOf(rule: Rule | null | undefined): { path: string; segments: string[]; reason: string } {
+  const resolved = resolveRuleFolder(rule);
+  return { path: resolved.folder, segments: resolved.segments.slice(), reason: resolved.invalidReason };
 }

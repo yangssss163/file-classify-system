@@ -11,6 +11,7 @@ import type {
   Rule,
   RulesLoadResult,
   RulesSaveResult,
+  RuleTargetView,
   ScanResult,
   UndoRunOutcome,
   UndoSummary,
@@ -160,6 +161,12 @@ const api = {
   loadRules: (): Promise<RulesLoadResult> => ipcRenderer.invoke('rules:load'),
   saveRules: (rules: Rule[]): Promise<RulesSaveResult> => ipcRenderer.invoke('rules:save', rules),
   rulesPath: (): Promise<string> => ipcRenderer.invoke('rules:path'),
+  /**
+   * 规则行上要显示的那句「归一化之后实际会建到哪儿」（分类名可以写多级：`照片\风光`）。
+   * 归一化只有 core 一处实现，界面照抄这里的结论。
+   */
+  ruleTargets: (rules: Rule[]): Promise<RuleTargetView[]> =>
+    ipcRenderer.invoke('rules:targets', rules ?? []),
   onProgress: (handler: (p: OrganizeProgress) => void): void => {
     ipcRenderer.on('organize:progress', (_event, payload: OrganizeProgress) => handler(payload));
   },

@@ -2,7 +2,7 @@
 # 标准由控制台写死，工作台只执行，不修改、不放宽。
 # 跑法：npm run 验收   （= powershell -ExecutionPolicy Bypass -File scripts\验收.ps1）
 #
-# 十三条断言（缺一不通过）：
+# 十六条断言（缺一不通过）：
 #   1 纯逻辑测试      accept-logic-test.js    -> 分类逻辑OK
 #   2 真实复制测试    accept-copy-test.js     -> 复制落地OK
 #   3 真程序活着      真启动 electron.exe     -> 窗口活着OK（沙箱 shell 里会被 install_dir_access.cc 拦下，需非沙箱窗口跑）
@@ -49,6 +49,14 @@
 #     点保存把三项传下去、点测试连接显示成功与失败两种结果）；
 #     含「探针有效性自检」：把密钥写进项目文件里 / 输入框改成普通文本型的产物必须判失败）
 #
+#  16 嵌套规则        accept-nested-rules-test.js -> 嵌套规则OK（纯逻辑，真造临时目录与文件 + 界面接线：
+#     规则的分类名可以是多级相对路径（照片\风光 → <这一层>\照片\风光\文件），不含分隔符时行为与现在完全一致；
+#     \ 与 / 等价；中间层真的被逐层创建；同深度同名不覆盖；与「子文件夹原样保留 / 沉进同名子文件夹」共存；
+#     所有目标都在它原来那一层之下（文件只往深处）；危险分类名（..\..\外面 / C:\temp\x / \\server\share /
+#     photos:bad / con / 结尾空格 / 结尾点）一律拒绝或有原因地安全归一化，源树之外的哨兵目录前后一个文件/目录都不多；
+#     界面侧：规则行显示归一化后的实际目标、预览树里多层结构被真的画成两层/三层；
+#     含「探针有效性自检」：内存里现造的「把 照片\风光 当成一个目录名」的产物必须判失败）
+#
 # 编码约定：全链路 UTF-8。本脚本与 node 子进程之间按 UTF-8 走，日志也是 UTF-8，
 # 所以看日志别按 GBK 解（那是乱码）。判定逻辑只看退出码 + 日志里的 ASCII 标记，与编码无关。
 
@@ -80,7 +88,7 @@ function Fail([string]$why) {
 # ---------- 第 1 条：纯逻辑测试（不需要界面） ----------
 $logic = $false
 try {
-  Write-Step '--- 1/13 纯逻辑测试 ---'
+  Write-Step '--- 1/16 纯逻辑测试 ---'
   $outDir = Join-Path $projectRoot 'out'
   New-Item -ItemType Directory -Force -Path $outDir | Out-Null
   $logicTestJs = Join-Path $stage 'accept-logic-test.js'
@@ -101,7 +109,7 @@ try {
 # ---------- 第 2 条：真实复制测试（不需要界面） ----------
 $copy = $false
 try {
-  Write-Step '--- 2/13 真实复制测试 ---'
+  Write-Step '--- 2/16 真实复制测试 ---'
   $caseDir = Join-Path $stage "accept-copy-$stamp"
   $srcDir = Join-Path $caseDir 'src'
   $dstDir = Join-Path $caseDir 'dst'
@@ -138,7 +146,7 @@ try {
 $alive = $false
 $elProc = $null
 try {
-  Write-Step '--- 3/13 真程序活着 ---'
+  Write-Step '--- 3/16 真程序活着 ---'
   $buildLog = Join-Path $stage 'accept-build.log'
   $nodeExe = (Get-Command node).Source
   # 用 node 直接跑 npm-cli.js，避开 npm.cmd 的批处理壳子（壳子会把 stderr 当成本命令失败）
@@ -212,7 +220,7 @@ try {
 # ---------- 第 4 条：预览不落盘（不需要界面） ----------
 $preview = $false
 try {
-  Write-Step '--- 4/13 预览不落盘 ---'
+  Write-Step '--- 4/16 预览不落盘 ---'
   $previewCase = Join-Path $stage "accept-preview-$stamp"
   $previewSrc = Join-Path $previewCase 'src'
   $previewOut = Join-Path $previewCase 'out-empty'
@@ -248,7 +256,7 @@ try {
 # ---------- 第 5 条：拖入取路径（拖进来的文件必须真的进得来） ----------
 $dropPath = $false
 try {
-  Write-Step '--- 5/13 拖入取路径 ---'
+  Write-Step '--- 5/16 拖入取路径 ---'
   $dropTestJs = Join-Path $stage 'accept-drop-path-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-drop-path-test.js') -Destination $dropTestJs -Force
   $dropLog = Join-Path $stage 'accept-drop-path.log'
@@ -271,7 +279,7 @@ try {
 # ---------- 第 6 条：规则引擎（纯逻辑，不依赖界面） ----------
 $ruleEngine = $false
 try {
-  Write-Step '--- 6/13 规则引擎 ---'
+  Write-Step '--- 6/16 规则引擎 ---'
   $ruleTestJs = Join-Path $stage 'accept-rules-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-rules-test.js') -Destination $ruleTestJs -Force
   $ruleLog = Join-Path $stage 'accept-rules.log'
@@ -293,7 +301,7 @@ try {
 # ---------- 第 7 条：规则编辑器（界面接线，不依赖真窗口） ----------
 $ruleEditor = $false
 try {
-  Write-Step '--- 7/13 规则编辑器 ---'
+  Write-Step '--- 7/16 规则编辑器 ---'
   $editorTestJs = Join-Path $stage 'accept-rules-editor-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-rules-editor-test.js') -Destination $editorTestJs -Force
   $editorLog = Join-Path $stage 'accept-rules-editor.log'
@@ -315,7 +323,7 @@ try {
 # ---------- 第 8 条：文件夹各归各（纯逻辑，真造临时目录与文件） ----------
 $folderPlan = $false
 try {
-  Write-Step '--- 8/13 文件夹各归各 ---'
+  Write-Step '--- 8/16 文件夹各归各 ---'
   $folderPlanTestJs = Join-Path $stage 'accept-folder-plan-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-folder-plan-test.js') -Destination $folderPlanTestJs -Force
   $folderPlanLog = Join-Path $stage 'accept-folder-plan.log'
@@ -337,7 +345,7 @@ try {
 # ---------- 第 9 条：文件夹预览（界面接线，不依赖真窗口） ----------
 $folderPreview = $false
 try {
-  Write-Step '--- 9/13 文件夹预览 ---'
+  Write-Step '--- 9/16 文件夹预览 ---'
   $folderPreviewTestJs = Join-Path $stage 'accept-folder-preview-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-folder-preview-test.js') -Destination $folderPreviewTestJs -Force
   $folderPreviewLog = Join-Path $stage 'accept-folder-preview.log'
@@ -363,7 +371,7 @@ try {
 # ---------- 第 10 条：撤销上一次整理（纯逻辑，真造临时目录与文件） ----------
 $undoOk = $false
 try {
-  Write-Step '--- 10/13 撤销上一次整理 ---'
+  Write-Step '--- 10/16 撤销上一次整理 ---'
   $undoTestJs = Join-Path $stage 'accept-undo-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-undo-test.js') -Destination $undoTestJs -Force
   $undoLog = Join-Path $stage 'accept-undo.log'
@@ -386,7 +394,7 @@ try {
 # ---------- 第 11 条：输出方向（纯逻辑 + 界面接线，不依赖真窗口） ----------
 $directionOk = $false
 try {
-  Write-Step '--- 11/13 输出方向 ---'
+  Write-Step '--- 11/16 输出方向 ---'
   $directionTestJs = Join-Path $stage 'accept-output-direction-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-output-direction-test.js') -Destination $directionTestJs -Force
   $directionLog = Join-Path $stage 'accept-output-direction.log'
@@ -409,7 +417,7 @@ try {
 # ---------- 第 12 条：AI 策略壳（纯逻辑，不联网络） ----------
 $aiStrategyOk = $false
 try {
-  Write-Step '--- 12/13 AI 策略壳 ---'
+  Write-Step '--- 12/16 AI 策略壳 ---'
   $aiStrategyTestJs = Join-Path $stage 'accept-ai-strategy-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-ai-strategy-test.js') -Destination $aiStrategyTestJs -Force
   $aiStrategyLog = Join-Path $stage 'accept-ai-strategy.log'
@@ -437,7 +445,7 @@ try {
 # ---------- 第 13 条：AI 界面壳（界面接线，真 ES module 在窗口式桩里执行） ----------
 $aiUiOk = $false
 try {
-  Write-Step '--- 13/13 AI 界面壳 ---'
+  Write-Step '--- 13/16 AI 界面壳 ---'
   $aiUiTestJs = Join-Path $stage 'accept-ai-ui-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-ai-ui-test.js') -Destination $aiUiTestJs -Force
   $aiUiLog = Join-Path $stage 'accept-ai-ui.log'
@@ -462,7 +470,7 @@ try {
 # ---------- 第 14 条：AI 真调用（本机假接口服务，不依赖外网） ----------
 $aiLiveOk = $false
 try {
-  Write-Step '--- 14/15 AI 真调用 ---'
+  Write-Step '--- 14/16 AI 真调用 ---'
   $aiLiveTestJs = Join-Path $stage 'accept-ai-live-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-ai-live-test.js') -Destination $aiLiveTestJs -Force
   $aiLiveLog = Join-Path $stage 'accept-ai-live.log'
@@ -486,7 +494,7 @@ try {
 # ---------- 第 15 条：AI 配置（读写 / 缺配置 / 密钥不外泄 / 界面接线） ----------
 $aiConfigOk = $false
 try {
-  Write-Step '--- 15/15 AI 配置 ---'
+  Write-Step '--- 15/16 AI 配置 ---'
   $aiConfigTestJs = Join-Path $stage 'accept-ai-config-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-ai-config-test.js') -Destination $aiConfigTestJs -Force
   $aiConfigLog = Join-Path $stage 'accept-ai-config.log'
@@ -507,7 +515,33 @@ try {
   Write-Host "AI配置测试异常：$($_.Exception.Message)"
 }
 
-if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview -and $undoOk -and $directionOk -and $aiStrategyOk -and $aiUiOk -and $aiLiveOk -and $aiConfigOk) {
+# ---------- 第 16 条：嵌套规则（纯逻辑，真造临时目录与文件；界面侧并进来） ----------
+$nestedRulesOk = $false
+try {
+  Write-Step '--- 16/16 嵌套规则 ---'
+  $nestedTestJs = Join-Path $stage 'accept-nested-rules-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-nested-rules-test.js') -Destination $nestedTestJs -Force
+  $nestedLog = Join-Path $stage 'accept-nested-rules.log'
+  # 这条要在 npm run build 之后跑（第 3 条已经跑过 build）：
+  # 脚本会 require out\core\index.js，并把界面产物（out\renderer\renderer.js）放进窗口式桩里真跑一遍。
+  # --experimental-vm-modules：要用真正的 ES module 作用域，没有它就直接判失败
+  $env:DSH_ACCEPT_OUT = $outDir
+  $env:DSH_ACCEPT_STAGE = $stage
+  & node --experimental-vm-modules $nestedTestJs *> $nestedLog
+  $nestedCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Remove-Item Env:\DSH_ACCEPT_STAGE -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $nestedLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
+  Write-Host "嵌套规则测试退出码=$nestedCode  日志=$nestedLog"
+  if ($nestedCode -eq 0 -and ((Get-Content -LiteralPath $nestedLog -Encoding UTF8 -Raw) -match '嵌套规则OK')) {
+    Write-Step '嵌套规则OK'
+    $nestedRulesOk = $true
+  }
+} catch {
+  Write-Host "嵌套规则测试异常：$($_.Exception.Message)"
+}
+
+if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview -and $undoOk -and $directionOk -and $aiStrategyOk -and $aiUiOk -and $aiLiveOk -and $aiConfigOk -and $nestedRulesOk) {
   Write-Step '验收通过'
   exit 0
 }
@@ -528,4 +562,5 @@ if (-not $aiStrategyOk) { $failedSteps += 'AI策略壳' }
 if (-not $aiUiOk) { $failedSteps += 'AI界面壳' }
 if (-not $aiLiveOk) { $failedSteps += 'AI真调用' }
 if (-not $aiConfigOk) { $failedSteps += 'AI配置' }
+if (-not $nestedRulesOk) { $failedSteps += '嵌套规则' }
 Fail ($failedSteps -join '+')

@@ -10,6 +10,7 @@ import type {
   Rule,
   RulesLoadResult,
   RulesSaveResult,
+  RuleTargetView,
   ScanResult,
   UndoRunOutcome,
   UndoSummary,
@@ -51,6 +52,11 @@ export interface OrganizerApi {
   saveRules(rules: Rule[]): Promise<RulesSaveResult>;
   /** 规则文件路径（只用于显示） */
   rulesPath(): Promise<string>;
+  /**
+   * 规则表 → 每条规则「归一化之后实际会建到哪儿」（分类名可以写多级：`照片\风光`）。
+   * 归一化只有 core 一处实现，界面照抄这里的结论，不自己再算一份。
+   */
+  ruleTargets(rules: Rule[]): Promise<RuleTargetView[]>;
   /** 上一次整理的记录（界面上那句「上一次整理：输出到 …，成功 N 个，可撤销」） */
   lastRun(): Promise<UndoSummary>;
   /** 撤销上一次整理：只删记录里列出的目标路径，原文件一律不动；幂等 */

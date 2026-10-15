@@ -35,14 +35,34 @@ export interface PreviewFile {
   error: PreviewFileError | null;
 }
 
-/** 预览树里的一个分类文件夹。 */
+/** 预览树里的一个分类文件夹（`children` 往下挂多层分类名：`照片\风光` 是两层）。 */
 export interface PreviewFolder {
-  /** 分类文件夹名 */
+  /** 分类文件夹名（多级时是这条路径上「最短的那一层」，如 `照片`） */
   folder: string;
-  /** 该文件夹下的文件个数 */
+  /** 该文件夹（含下面各层）下的文件个数 */
   count: number;
   /** 该文件夹下的文件明细 */
   files: PreviewFile[];
+  /** 多层分类名的下一层（单层规则为空数组） */
+  children: PreviewFolder[];
+}
+
+/**
+ * 多层分类名逐层展开出来的一个目录节点（本片新增）。
+ * 规则的分类名写 `照片\风光` 时，磁盘上会建「这一层 + 照片 + 风光」三个目录，
+ * 预览照这个结构画：`照片` 下面还有一层 `风光`。
+ */
+export interface PreviewCategoryNode {
+  /** 这一层的目录名（一段，不含分隔符） */
+  folder: string;
+  /** 相对「这一层」的完整分类路径（`照片`、`照片\风光`） */
+  path: string;
+  /** 这一层（含下面各层）一共有几个文件 */
+  count: number;
+  /** 直接落在这一层目录里的文件（中间层通常是空的） */
+  files: PreviewFile[];
+  /** 下一层 */
+  children: PreviewCategoryNode[];
 }
 
 /**
@@ -70,8 +90,10 @@ export interface PreviewSourceFolder {
   /** 有多少散文件是「按规则新建分类夹」的 */
   classifiedCount: number;
   renamed: boolean;
-  /** 这一层根下散文件按规则**新建**的分类夹 */
+  /** 这一层根下散文件按规则**新建**的分类夹（`folder` 是完整分类路径） */
   categories: PreviewFolder[];
+  /** 上面的分类夹按**多层路径**逐层展开出来的结构（与磁盘上会建的目录一一对应） */
+  categoryTree: PreviewCategoryNode[];
   /** 沉进这一份的散文件（顶层为空） */
   mergedIn: PreviewFile[];
   /** 它们各自沉了几层（与 `mergedIn` 一一对应） */
@@ -103,7 +125,8 @@ export interface PreviewSubFolder {
 /** 预览树里的一个顶层源文件夹。 */
 export interface PreviewRoot {
   name: string;
-  path: string;
+  /** 源文件夹完整路径（字段名不叫 `path`：界面产物里不许出现 `.path` 那种属性读法） */
+  sourcePath: string;
   /** 输出里的顶层名字（同名不覆盖时可能被改成「备份 (2)」） */
   outputName: string;
   /** 是不是因为「另一个同名顶层源文件夹」改过名 */
@@ -114,9 +137,10 @@ export interface PreviewRoot {
   total: number;
 }
 
-/** 一棵分类预览树：每个分类一行（名字 + 数量），展开是文件名。 */
+/** 一棵分类预览树：每个分类一行（名字 + 数量），展开是文件名；多级分类名往 `children` 里挂。 */
 export interface PreviewTree {
   total: number;
+  /** 按分类**路径**排好的分组（`照片\风光` 是「`照片` → `风光`」两层） */
   folders: PreviewFolder[];
   counts: Record<string, number>;
   files: PreviewFile[];
@@ -346,6 +370,25 @@ export interface RulesLoadResult {
   source: 'file' | 'default';
   message: string;
   filePath: string;
+  /** 每条规则归一化之后的实际目标（规则行上显示；按 id 对得上） */
+  targets?: RuleTargetView[];
+}
+
+/**
+ * 一条规则「归一化之后实际会建到哪儿」（分类名可以写多级：`照片\风光`）。
+ * `targetPath` 为空串 = 这个分类名不能用，`reason` 是那句人话（文件会落到兜底分类）。
+ */
+export interface RuleTargetView {
+  id: string;
+  /**
+   * 归一化之后的分类路径（多级就是 `照片\风光`）；不能用时为空串。
+   * 名字不叫 `path`：界面产物里不许出现 `.path` 这种属性读法（见第 5 条验收）。
+   */
+  targetPath: string;
+  /** 各层文件夹名（单层一项） */
+  segments: string[];
+  /** 不能用时的人话原因；能用时为空串 */
+  reason: string;
 }
 
 /** 规则保存结果。 */
@@ -451,6 +494,11 @@ export interface OrganizerApi {
   saveRules(rules: Rule[]): Promise<RulesSaveResult>;
   /** 规则文件路径（只用于显示） */
   rulesPath(): Promise<string>;
+  /**
+   * 规则表 → 每条规则「归一化之后实际会建到哪儿」（分类名可以写多级：`照片\风光`）。
+   * 归一化只有 core 一处实现，界面照抄这里的结论，不自己再算一份。
+   */
+  ruleTargets(rules: Rule[]): Promise<RuleTargetView[]>;
   /**
    * 上一次整理的记录（界面上那句「上一次整理：输出到 …，成功 N 个，可撤销」）。
    * 没有可撤销的整理时 available=false 并给一句人话原因，按钮据此变灰。

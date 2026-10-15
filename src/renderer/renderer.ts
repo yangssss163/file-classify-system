@@ -13,11 +13,14 @@ import type {
   OrganizeProgress,
   OrganizerApi,
   OutputDirectionCheck,
+  PreviewCategoryNode,
   PreviewOutcome,
   PreviewSourceFolder,
   PreviewSubFolder,
   PreviewTree,
   Rule,
+  RulesLoadResult,
+  RuleTargetView,
   ScanResult,
   SkippedPath,
   UndoSummary,
@@ -430,6 +433,23 @@ function categoryBlock(group: { folder: string; count: number; files: PreviewTre
 }
 
 /**
+ * 多层分类名逐层画出来：`照片\风光` 必须画成「`照片` 这一层下面还有一层 `风光`」，
+ * 而不是把带分隔符的整个名字当成一个目录名（这是本片的硬要求）。
+ * 只有一层时就是普通的那一行（既有行为不变）。
+ */
+function categoryTreeNode(node: PreviewCategoryNode): HTMLDivElement {
+  const { box, body } = collapsible(`${node.folder}`, '', 'files', true, 'cat');
+  for (const f of node.files) body.appendChild(fileLine(f));
+  for (const child of node.children ?? []) {
+    const childBox = categoryTreeNode(child);
+    // 下一层挂在这一层的正文里：`照片` 的框里能看到 `风光` 的框
+    childBox.className = 'cat cat-nest';
+    body.appendChild(childBox);
+  }
+  return box;
+}
+
+/**
  * 「原样保留」的那棵子树里的一个目录。
  * 预览里**只给树**：目录名 + 里面的文件名，不再写「几个文件」「沉了几层」「为什么沉进来」那些过程说明。
  */
@@ -449,7 +469,13 @@ function sourceFolderBlock(sf: PreviewSourceFolder, depth: number): HTMLDivEleme
   const label = `${sf.name}${sf.renamed ? '（同名，已改成别的输出名）' : ''}（源：${sf.sourcePath}）`;
   const { box, body } = collapsible(label, '', 'source-files', depth === 0, 'source');
   for (const sub of sf.subfolders) body.appendChild(subFolderBlock(sub, 0));
-  for (const g of sf.categories) body.appendChild(categoryBlock(g));
+  // 多级分类名逐层画（`categoryTree`）；没有它时退回按规则逐条画（一层一条，形状与现在一样）
+  const tree = sf.categoryTree;
+  if (Array.isArray(tree) && tree.length > 0) {
+    for (const node of tree) body.appendChild(categoryTreeNode(node));
+  } else {
+    for (const g of sf.categories) body.appendChild(categoryBlock(g));
+  }
   return box;
 }
 
@@ -465,7 +491,7 @@ function renderPreviewTree(tree: PreviewTree): void {
   if (tree.tracked && Array.isArray(tree.roots) && tree.roots.length > 0) {
     for (const root of tree.roots) {
       const { box, body } = collapsible(
-        `${root.name}${root.renamed ? '（同名，输出里已改名）' : ''}（源：${root.path}）→ 输出根下的 ${root.outputName}\\`,
+        `${root.name}${root.renamed ? '（同名，输出里已改名）' : ''}（源：${root.sourcePath}）→ 输出根下的 ${root.outputName}\\`,
         '',
         'root-files',
         true,
@@ -676,6 +702,14 @@ let currentRules: Rule[] = [];
 /** 上次保存之后又改过规则没有（用来提示「还没保存」）。 */
 let rulesDirty = false;
 
+/**
+ * 每条规则「归一化之后实际会建到哪儿」，按 id 存一份。
+ * 结论由 core 给（`api.ruleTargets()`，与真正落盘用的是同一个函数），界面只缓存 + 照抄，
+ * 免得「界面显示的目标」与「实际落盘的目标」变成两套。
+ * `sourceName` 是「这份结论是按哪个规则名算的」：规则名一改，这份结论立刻作废（不显示旧结论）。
+ */
+const ruleTargets = new Map<string, { sourceName: string; targetPath: string; segments: string[]; reason: string }>();
+
 /** 界面上一次最多显示几行规则（避免规则太多把页面撑爆，不影响实际求值）。 */
 const RULE_ROWS_MAX = 50;
 
@@ -692,6 +726,30 @@ function splitList(text: string): string[] {
 /** 列表 → 输入框里的文字（原样回显，方便用户改）。 */
 function listText(values: readonly string[] | undefined): string {
   return (values ?? []).join(', ');
+}
+
+/**
+ * 规则行上那句「实际会建到哪儿」：分类名允许写多级（`照片\风光`），
+ * 让人一眼看出这一条会建几层 —— 这是用户要的「让用户一眼看到 `照片\风光`」。
+ *
+ * 归一化的**权威结论由 core 给**（`api.ruleTargets()`，与真正落盘用的是同一个函数），
+ * 这里只做两件事：缓存一份（按 id 对上行）＋ 照抄进那一行。界面绝不自己另写一套归一化。
+ * 还没拿到的瞬间（刚点「新增规则」）先按名字直显：没有分隔符时与权威结论一字不差，
+ * 有分隔符时下面会写出「共 N 层」；规则行重画后一律以 core 的结论为准。
+ */
+function ruleTargetText(rule: Rule): string {
+  const cached = ruleTargets.get(rule.id);
+  // 缓存是按**当时的规则名**算的：名字改过之后这份结论就不成立了，退回按名字直显（不显示旧结论）。
+  if (cached && cached.sourceName === String(rule.name ?? '')) {
+    if (cached.targetPath.length === 0) {
+      return `→ 不能用（${cached.reason || '这个分类名不能用'}）`;
+    }
+    return `→ ${cached.targetPath}\\${cached.segments.length > 1 ? `，共 ${cached.segments.length} 层` : ''}`;
+  }
+  const name = String(rule.name ?? '').trim();
+  if (name.length === 0) return '→ （还没写分类名）';
+  const layers = name.split(/[\\/]+/).filter((s) => s.length > 0).length;
+  return `→ ${name}${layers > 1 ? `（共 ${layers} 层）` : ''}`;
 }
 
 /** 界面上显示的一行说明：这条规则在按什么判断。 */
@@ -810,11 +868,15 @@ function setRules(next: Rule[], dirty = true): void {
   invalidatePreview();
 }
 
-/** 只改内容、不动顺序时用（避免每敲一个字就重画整张表，把光标顶掉）。 */
+/** 改完规则一律：刷新条数 → 让旧预览作废 → 记「还没保存」→ 把「实际目标」按新名字再问一遍。 */
 function touchRule(): void {
   rulesDirty = true;
   refreshRuleCount();
   invalidatePreview();
+  // 只改内容、不重画整张表时也要把「这一条实际会建到哪儿」重新问一遍 core：
+  // 分类名改了，core 给的那份结论就变了（多级分类名尤其明显）。
+  // 这一格按名字直显也会给出同样的路径，但**权威结论只认 core 那一份**，所以这里顺手刷新。
+  void refreshRuleTargets();
 }
 
 /** 画一行规则：启用勾选、规则名、条件、上移/下移/删除。 */
@@ -838,12 +900,22 @@ function ruleRow(rule: Rule, index: number): HTMLDivElement {
   order.className = 'rule-index';
   order.textContent = String(index + 1);
 
+  // 规则行上显示**归一化之后的实际目标**：写 `照片\风光` 就显示「→ 照片\风光\，共 2 层」。
+  const targetLabel = document.createElement('span');
+  targetLabel.className = 'rule-target';
+  targetLabel.textContent = ruleTargetText(rule);
+
   const nameInput = makeField({
     className: 'rule-name',
     type: 'text',
     value: rule.name,
     onChange: (value) => {
       rule.name = value;
+      // 这一行的名字变了：core 给的那份「实际目标」对应的是**改名之前**的结论，立刻作废，
+      // 免得规则行上继续显示一个已经不成立的目标（改成新的之后那一格会按名字直显）。
+      // 随后 `touchRule()` 会重画整张表 → `refreshRuleTargets()` 去 core 取新的结论回来补上。
+      ruleTargets.delete(rule.id);
+      targetLabel.textContent = ruleTargetText(rule);
       touchRule();
     },
   });
@@ -935,6 +1007,7 @@ function ruleRow(rule: Rule, index: number): HTMLDivElement {
     checkbox,
     order,
     nameInput,
+    targetLabel,
     rowLabel('后缀'),
     extInput,
     rowLabel('文件名含'),
@@ -974,6 +1047,59 @@ function renderRuleRows(): void {
     }
   }
   refreshRuleCount();
+  // 规则行上那句「实际会建到哪儿」要的是 core 的归一化结论（多级分类名尤其如此）：
+  // 拿回来之后把这几行更新一遍（不重画整张表，别把用户正在敲的光标顶掉）。
+  void refreshRuleTargets();
+}
+
+/**
+ * 把每条规则「归一化之后实际会建到哪儿」从 core 取回来（同一个归一化函数），
+ * 再更新**当前页面上**那几行规则的目标文字（整张表重画的场合由 `renderRuleRows()` 自己带上）。
+ *
+ * 取回来的是「每条规则一项」，所以**整表替换**：同一个 id 的规则改了名字之后目标会变，
+ * 留着上一次的结论会让规则行显示一个已经不成立的目标。
+ * 另外用序号挡住乱序回包：只有最后一次请求的结论算数（免得旧的回包把新的盖掉）。
+ */
+let ruleTargetsSeq = 0;
+async function refreshRuleTargets(): Promise<void> {
+  if (!api || typeof api.ruleTargets !== 'function') return; // 老接口：按名字直显，不阻塞界面
+  const seq = ++ruleTargetsSeq;
+  const asked = rulesForUse();
+  let list: RuleTargetView[] = [];
+  try {
+    list = await api.ruleTargets(asked);
+  } catch {
+    return; // 取不到就沿用上一份（或按名字直显），绝不把界面搞崩
+  }
+  if (!Array.isArray(list) || seq !== ruleTargetsSeq) return;
+  ruleTargets.clear();
+  list.forEach((entry, index) => {
+    if (!entry || typeof entry.id !== 'string') return;
+    ruleTargets.set(entry.id, {
+      // 记下「这份结论是按哪个规则名算的」：规则名一改就作废，不显示旧结论。
+      sourceName: String(asked[index]?.name ?? ''),
+      targetPath: String(entry.targetPath ?? ''),
+      segments: Array.isArray(entry.segments) ? entry.segments.map((s) => String(s)) : [],
+      reason: String(entry.reason ?? ''),
+    });
+  });
+  refreshRuleTargetLabels();
+}
+
+/** 把页面上那几行规则的目标文字重写一遍（不重画整张表，别把用户正在敲的光标顶掉）。 */
+function refreshRuleTargetLabels(): void {
+  const containers = Array.from(el.ruleList.children ?? []);
+  currentRules.slice(0, RULE_ROWS_MAX).forEach((rule, index) => {
+    const row = containers[index] as (HTMLDivElement & { children?: unknown[] }) | undefined;
+    const spans = row ? Array.from(row.children ?? []) : [];
+    for (const child of spans) {
+      const node = child as { className?: string; textContent?: string };
+      if (node.className === 'rule-target') {
+        node.textContent = ruleTargetText(rule);
+        break;
+      }
+    }
+  });
 }
 
 /* ---------------- 规则：保存 / 加载 / 恢复默认 ---------------- */
@@ -997,7 +1123,7 @@ async function saveRulesToDisk(): Promise<void> {
 }
 
 async function loadRulesFromDisk(): Promise<void> {
-  let result: { ok?: boolean; rules?: Rule[] | null; message?: string } | null = null;
+  let result: RulesLoadResult | null = null;
   try {
     result = await api.loadRules();
   } catch (err) {
@@ -1009,6 +1135,7 @@ async function loadRulesFromDisk(): Promise<void> {
     setRuleStatus('没有读到规则，先用默认规则');
     return;
   }
+  stashRuleTargets(result?.targets);
   setRules(rules, false);
   setRuleStatus(describeLoad(result));
   notice('规则已就绪');
@@ -1050,6 +1177,7 @@ async function initRules(): Promise<void> {
     const result = await api.loadRules();
     if (result && Array.isArray(result.rules) && result.rules.length > 0) {
       currentRules = result.rules;
+      stashRuleTargets(result.targets);
       setRuleStatus(describeLoad(result));
     } else {
       setRuleStatus('没有读到规则，先用默认规则');
@@ -1058,6 +1186,26 @@ async function initRules(): Promise<void> {
     setRuleStatus(`读规则失败：${(err as Error)?.message ?? '未知错误'}（先用默认规则）`);
   }
   renderRuleRows();
+}
+
+/**
+ * 收下 core 给的「每条规则实际会建到哪儿」（按 id 对上那一行）。
+ * `sourceName` 就是这一批规则里对应的那个规则名：规则名一改这份结论立刻作废。
+ */
+function stashRuleTargets(
+  list: readonly { id: string; targetPath?: string; segments: string[]; reason: string }[] | undefined,
+  rules: readonly Rule[] = currentRules,
+): void {
+  for (const entry of list ?? []) {
+    if (!entry || typeof entry.id !== 'string') continue;
+    const source = rules.find((r) => r.id === entry.id);
+    ruleTargets.set(entry.id, {
+      sourceName: String(source?.name ?? ''),
+      targetPath: String(entry.targetPath ?? ''),
+      segments: Array.isArray(entry.segments) ? entry.segments.map((s) => String(s)) : [],
+      reason: String(entry.reason ?? ''),
+    });
+  }
 }
 
 /* ---------------- 拖拽 ---------------- */
