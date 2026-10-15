@@ -254,9 +254,19 @@ class DevRun {
     return max;
   }
 
+  /** dev 自己报出来的 Electron 进程号（收工时要一个个收掉，别留下没窗口的残骸）。 */
+  spawnedElectronPids() {
+    const all = this.whole();
+    const pids = new Set();
+    for (const m of all.matchAll(/electron 已拉起 pid=(\d+)/g)) pids.add(Number(m[1]));
+    return [...pids];
+  }
+
+  /** 收工：先收掉它拉起的 Electron（一个都不许留），再收掉 dev 自己。 */
   async stop() {
     if (!this.child) return;
     const pid = this.child.pid;
+    const electronPids = this.spawnedElectronPids();
     // ① 先请它自己收工（dev.mjs 收到 SIGTERM 会收掉 Electron 并退出）
     try {
       this.child.kill('SIGTERM');
@@ -280,13 +290,29 @@ class DevRun {
     } catch {
       /* ignore */
     }
+    // ③ Electron 是单独拉起来的（父进程死了它不一定跟着死），按 pid 明确收掉
+    const leftovers = [];
     await sleep(500);
+    const stillAliveElectron = [];
+    for (let i = 0; i < 10; i++) {
+      const alive = electronPids.filter((ep) => exists(ep));
+      if (alive.length === 0) break;
+      for (const ep of alive) {
+        try {
+          spawn('taskkill', ['/PID', String(ep), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).unref();
+        } catch {
+          /* ignore */
+        }
+      }
+      await sleep(500);
+    }
+    stillAliveElectron.push(...electronPids.filter((ep) => exists(ep)));
     try {
       fs.closeSync(this.fd);
     } catch {
       /* ignore */
     }
-    return { exited: Boolean(this.exited), stillAlive: exists(pid) };
+    return { exited: Boolean(this.exited), stillAlive: exists(pid), electronLeftovers: leftovers, stillAliveElectron };
   }
 }
 
@@ -570,6 +596,10 @@ async function runScenario(run) {
     const stopped = await dev.stop();
     evidence.stopped = stopped;
     ok(!stopped.stillAlive, `dev 收工以后进程必须真的没了（pid ${dev.pid} 还在）`);
+    ok(
+      stopped.stillAliveElectron.length === 0,
+      `dev 收工以后不许留下 Electron 残骸（还在：${stopped.stillAliveElectron.join(', ')}）`,
+    );
 
     const status = gitStatus().replace(/\r/g, '');
     eq(
@@ -761,7 +791,9 @@ async function main() {
     if (evidence.reloadProbe) {
       console.log(`窗口刷新探针：退出码 ${evidence.reloadProbe.code}；${tail(evidence.reloadProbe.out, 6)}`);
     }
-    console.log(`收工：dev 进程退出=${evidence.stopped.exited}、残留进程=${evidence.stopped.stillAlive}`);
+    console.log(
+      `收工：dev 进程退出=${evidence.stopped.exited}、残留进程=${evidence.stopped.stillAlive}、Electron 残留=${evidence.stopped.stillAliveElectron.length}`,
+    );
     console.log(`git 跟踪文件 ${evidence.trackedFilesBefore} -> ${evidence.trackedFilesAfter}`);
   }
 
