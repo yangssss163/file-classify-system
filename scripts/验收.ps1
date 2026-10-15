@@ -526,11 +526,9 @@ try {
   # 脚本会 require out\core\index.js，并把界面产物（out\renderer\renderer.js）放进窗口式桩里真跑一遍。
   # --experimental-vm-modules：要用真正的 ES module 作用域，没有它就直接判失败
   $env:DSH_ACCEPT_OUT = $outDir
-  $env:DSH_ACCEPT_STAGE = $stage
   & node --experimental-vm-modules $nestedTestJs *> $nestedLog
   $nestedCode = $LASTEXITCODE
   Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
-  Remove-Item Env:\DSH_ACCEPT_STAGE -ErrorAction SilentlyContinue
   Get-Content -LiteralPath $nestedLog -Encoding UTF8 -Tail 40 | ForEach-Object { Write-Host $_ }
   Write-Host "嵌套规则测试退出码=$nestedCode  日志=$nestedLog"
   if ($nestedCode -eq 0 -and ((Get-Content -LiteralPath $nestedLog -Encoding UTF8 -Raw) -match '嵌套规则OK')) {
