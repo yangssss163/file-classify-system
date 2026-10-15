@@ -12,6 +12,7 @@
     "prestart": "npm run build",
     "start": "node scripts/start-electron.mjs",
     "start:headless": "node scripts/start-electron.mjs --no-window",
+    "dev": "node scripts/dev.mjs",
     "验收:拖入取路径": "node --experimental-vm-modules scripts/accept-drop-path-test.js",
     "验收": "npm run build && powershell -ExecutionPolicy Bypass -File scripts\\验收.ps1"
   },

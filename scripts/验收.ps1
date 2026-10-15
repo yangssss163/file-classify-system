@@ -57,6 +57,16 @@
 #     界面侧：规则行显示归一化后的实际目标、预览树里多层结构被真的画成两层/三层；
 #     含「探针有效性自检」：内存里现造的「把 照片\风光 当成一个目录名」的产物必须判失败）
 #
+#  17 热加载          accept-dev-hot-reload-test.js -> 热加载OK（真跑一次 npm run dev，不依赖真窗口：
+#     `npm run dev` 能启动、打印「热加载就绪」、之后一直活着（沙箱里窗口起不来时它要明确打印
+#     「窗口起不来（沙箱环境），热加载仍可用」并继续监听）；
+#     改 src/renderer/** → dev 打印「重编译 + 刷新窗口」那类日志，且 out/renderer/renderer.js 真的被重新生成（mtime 前进）；
+#     改 src/main.ts → dev 打印「重编译 + 主进程重启」那类日志，且 out/main.js 真的被重新生成；
+#     连续 3 次快速变更 → 完整构建次数 < 3（合并窗口 100~300ms，可配 DSH_DEV_DEBOUNCE_MS）；
+#     跑完临时改动全部还原、工作区回到跑之前的样子（含未跟踪文件）、没有新增被 git 跟踪的文件；
+#     `npm run build` 仍然成功；含「探针有效性自检」：现造的「起来就退出」与「假装热加载但不重编译」
+#     两个假 dev 喂给同一套断言必须判失败）
+#
 # 编码约定：全链路 UTF-8。本脚本与 node 子进程之间按 UTF-8 走，日志也是 UTF-8，
 # 所以看日志别按 GBK 解（那是乱码）。判定逻辑只看退出码 + 日志里的 ASCII 标记，与编码无关。
 
@@ -539,7 +549,51 @@ try {
   Write-Host "嵌套规则测试异常：$($_.Exception.Message)"
 }
 
-if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview -and $undoOk -and $directionOk -and $aiStrategyOk -and $aiUiOk -and $aiLiveOk -and $aiConfigOk -and $nestedRulesOk) {
+# ---------- 第 17 条：热加载（真跑一次 npm run dev，不依赖真窗口） ----------
+$hotReloadOk = $false
+try {
+  Write-Step '--- 17/17 热加载 ---'
+  $hotTestJs = Join-Path $stage 'accept-dev-hot-reload-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-dev-hot-reload-test.js') -Destination $hotTestJs -Force
+  $hotLog = Join-Path $stage 'accept-dev-hot-reload.log'
+  # 这条自己起 npm run dev（scripts\dev.mjs，等于 npm run dev），自己临时改 src 下的两个源文件、
+  # 自己按「改之前的原始字节」还原；日志一律写 .dsh-staging 下。
+  # 「跑完和跑之前一模一样」这条判据在 node 那侧判（跑前/跑后 git status 逐字相同 + 没有新增被跟踪的文件）；
+  # 这里另外按内容哈希核对一次它动过的那两个文件有没有还原干净。
+  $env:DSH_ACCEPT_STAGE = $stage
+  $env:DSH_ACCEPT_OUT = $outDir
+  $gitLog = Join-Path $stage 'accept-dev-hot-reload.git.log'
+  & cmd /c "git -C `"$projectRoot`" rev-parse --short HEAD > `"$gitLog`" 2>&1"
+  $gitBefore = ((Get-Content -LiteralPath $gitLog -Encoding UTF8 -ErrorAction SilentlyContinue) -join ' ').Trim()
+  $snapshotText = (& cmd /c "git -C `"$projectRoot`" hash-object src\renderer\renderer.ts src\main.ts 2>&1") -join '|'
+  & node $hotTestJs *> $hotLog
+  $hotCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_STAGE -ErrorAction SilentlyContinue
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  $snapshotAfter = (& cmd /c "git -C `"$projectRoot`" hash-object src\renderer\renderer.ts src\main.ts 2>&1") -join '|'
+  & cmd /c "git -C `"$projectRoot`" rev-parse --short HEAD > `"$gitLog`" 2>&1"
+  $gitAfter = ((Get-Content -LiteralPath $gitLog -Encoding UTF8 -ErrorAction SilentlyContinue) -join ' ').Trim()
+  Get-Content -LiteralPath $hotLog -Encoding UTF8 -Tail 45 | ForEach-Object { Write-Host $_ }
+  Write-Host "热加载测试退出码=$hotCode  日志=$hotLog"
+  Write-Host "热加载测试前后提交=$gitBefore -> $gitAfter（相同=$($gitBefore -eq $gitAfter)）"
+  Write-Host "热加载测试前后两个源文件的内容哈希=$snapshotText / $snapshotAfter（相同=$($snapshotText -eq $snapshotAfter)）"
+  if ($snapshotText -ne $snapshotAfter) {
+    # 真出了「临时改动没还原」才会走到这里：报失败，并把这两个文件还原回仓库版本
+    $restoreLog = Join-Path $stage 'accept-dev-hot-reload.restore.log'
+    & cmd /c "git -C `"$projectRoot`" checkout -- src\renderer\renderer.ts src\main.ts > `"$restoreLog`" 2>&1"
+    Write-Host '验收失败:热加载（临时改动没还原干净，已把这两个文件还原回仓库版本）'
+  }
+  if ($hotCode -eq 0 -and ((Get-Content -LiteralPath $hotLog -Encoding UTF8 -Raw) -match '热加载OK') -and $snapshotText -eq $snapshotAfter) {
+    Write-Step '热加载OK'
+    $hotReloadOk = $true
+  } else {
+    Write-Host '验收失败:热加载'
+  }
+} catch {
+  Write-Host "热加载测试异常：$($_.Exception.Message)"
+}
+
+if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview -and $undoOk -and $directionOk -and $aiStrategyOk -and $aiUiOk -and $aiLiveOk -and $aiConfigOk -and $nestedRulesOk -and $hotReloadOk) {
   Write-Step '验收通过'
   exit 0
 }
@@ -561,4 +615,5 @@ if (-not $aiUiOk) { $failedSteps += 'AI界面壳' }
 if (-not $aiLiveOk) { $failedSteps += 'AI真调用' }
 if (-not $aiConfigOk) { $failedSteps += 'AI配置' }
 if (-not $nestedRulesOk) { $failedSteps += '嵌套规则' }
+if (-not $hotReloadOk) { $failedSteps += '热加载' }
 Fail ($failedSteps -join '+')

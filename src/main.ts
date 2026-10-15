@@ -5,6 +5,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
+import * as http from 'http';
 import * as path from 'path';
 import {
   aiClassifyByPaths,
@@ -86,6 +87,102 @@ function announceReady(how: string): void {
   } catch {
     /* 没有 stdout 时忽略 */
   }
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * 开发用「窗口刷新小接口」（只在 npm run dev 里存在，产品行为不受影响）
+ * ---------------------------------------------------------------------------
+ * npm run dev 会带 `--dev-reload-port=0` 启动本进程；没带这个开关时（npm start、以后打的包）
+ * 下面这段一行都不跑，监听端口也不会开，产品行为一个字都不变。
+ * 它在 127.0.0.1 上开一个只认本机、只认令牌的极小接口，就一个用途：
+ * 让 scripts/dev.mjs（热加载）在界面代码重编译完以后喊一声「刷新窗口」。
+ * 令牌是 dev 生成的一串随机字符，写在 --dev-reload-token-file 指的文件里；
+ * 这里从文件读，不读环境变量（免得跟「模块代码体里不许出现 process.env」那条验收判据混淆）。
+ * 返回体里的 rendererId 是刷新**之后**的 renderer 进程号，用来给人/脚本一个回执。
+ */
+type DevReloadReply = { ok: boolean; action: string; rendererId: number; windows: number };
+
+function startDevReloadBridge(): void {
+  const portRaw = argValue('--dev-reload-port');
+  if (portRaw === null) return;
+
+  const tokenFile = argValue('--dev-reload-token-file');
+  let token = '';
+  if (tokenFile) {
+    try {
+      token = fs.readFileSync(path.resolve(tokenFile), 'utf8').trim();
+    } catch {
+      token = '';
+    }
+  }
+  if (!token) {
+    process.stderr.write('[dev-reload] 没读到令牌文件，窗口刷新小接口不启动\n');
+    return;
+  }
+
+  const port = Number.parseInt(portRaw, 10);
+  const server = http.createServer((req, res) => {
+    const send = (code: number, payload: DevReloadReply): void => {
+      const body = JSON.stringify(payload);
+      res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(body);
+    };
+    let pathname = '/';
+    try {
+      pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    } catch {
+      pathname = '/';
+    }
+    if (req.method === 'GET' && pathname === '/dev-health') {
+      send(200, {
+        ok: true,
+        action: 'health',
+        rendererId: 0,
+        windows: BrowserWindow.getAllWindows().length,
+      });
+      return;
+    }
+    if (req.method !== 'POST' || pathname !== '/dev-reload') {
+      send(404, { ok: false, action: 'none', rendererId: 0, windows: 0 });
+      return;
+    }
+    if ((req.headers.authorization ?? '') !== `Bearer ${token}`) {
+      send(403, { ok: false, action: 'rejected', rendererId: 0, windows: 0 });
+      return;
+    }
+    const win = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
+    if (!win || win.isDestroyed()) {
+      send(200, { ok: false, action: 'no-window', rendererId: 0, windows: 0 });
+      return;
+    }
+    win.webContents.reloadIgnoringCache();
+    send(200, {
+      ok: true,
+      action: 'reloaded',
+      rendererId: win.webContents.getOSProcessId(),
+      windows: BrowserWindow.getAllWindows().length,
+    });
+  });
+  server.on('error', (err: Error) => {
+    process.stderr.write(`[dev-reload] 窗口刷新小接口起不来：${err.message}\n`);
+  });
+  server.listen(port, '127.0.0.1', () => {
+    const addr = server.address();
+    const actual = typeof addr === 'object' && addr ? addr.port : port;
+    if (tokenFile) {
+      try {
+        fs.writeFileSync(
+          path.resolve(tokenFile),
+          JSON.stringify({ port: actual, token, pid: process.pid, at: new Date().toISOString() }),
+          'utf8',
+        );
+      } catch (err) {
+        process.stderr.write(`[dev-reload] 端口信息没写进文件：${(err as Error).message}\n`);
+      }
+    }
+    process.stdout.write(`[dev-reload] 窗口刷新小接口在 127.0.0.1:${actual}\n`);
+  });
 }
 
 function createWindow(): void {
@@ -454,6 +551,8 @@ ipcMain.handle('shell:openPath', async (_event, dir: string) => {
 
 app.whenReady().then(() => {
   createWindow();
+  // 开发用（只有 npm run dev 才带 --dev-reload-port）：给热加载开一个本机小接口；没带开关就什么都不做
+  startDevReloadBridge();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
