@@ -12,6 +12,7 @@ out/
 !package.json
 !package-lock.json
 !tsconfig.json
+!tsconfig.renderer.json
 !src/
 !src/**
 !scripts/
@@ -27,3 +28,11 @@ artifacts/
 .electron-builder-cache/
 .npm-cache/
 *.log
+
+# --- 密钥与本机记录：钉死在最后（后写的优先），防止以后有人放宽白名单时被顺带带进仓库 ---
+# --- 程序真用的那份在 %APPDATA%\file-organizer\ 下（userData），本来就不在项目里 ---
+organizer-ai.json
+organizer-rules.json
+organizer-last-run.json
+organizer-history.json
+organizer-delete-audit.log
