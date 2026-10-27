@@ -280,7 +280,13 @@ async function runRenderer(source, label, organizer) {
   let error = null;
   try {
     const mod = new vm.SourceTextModule(source, { identifier: label });
-    await mod.link(() => {
+    await mod.link((specifier) => {
+      // 允许界面引用自己的纯数据模块（关系链球模型）；其它任何 import 一律不许
+      if (specifier === './planGraph.js') {
+        const dir = process.env.DSH_ACCEPT_OUT || path.join(__dirname, '..', 'out');
+        const target = path.join(dir, 'renderer', specifier);
+        return new vm.SourceTextModule(fs.readFileSync(target, 'utf8'), { identifier: target });
+      }
       throw new Error(`${label} must not import anything at load time`);
     });
     await mod.evaluate();

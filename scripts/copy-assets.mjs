@@ -25,3 +25,18 @@ for (const asset of assets) {
   copyFileSync(src, join(to, asset));
   console.log(`copied ${asset} -> out/renderer/${asset}`);
 }
+
+// 图标：窗口图标（main.ts 找 out/assets/icon.ico）与界面里的图（../assets/...）
+// 都从 out/ 根下的 assets 取；源文件在项目根 assets/，由 npm run icon 生成。
+const iconDir = join(projectRoot, 'assets');
+const outAssets = join(projectRoot, 'out', 'assets');
+mkdirSync(outAssets, { recursive: true });
+for (const icon of ['icon.ico', 'icon.png', 'icon.svg']) {
+  const src = join(iconDir, icon);
+  if (!existsSync(src)) {
+    console.error(`缺少图标：${src}（先跑 npm run icon 生成）`);
+    process.exit(1);
+  }
+  copyFileSync(src, join(outAssets, icon));
+  console.log(`copied assets/${icon} -> out/assets/${icon}`);
+}

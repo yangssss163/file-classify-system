@@ -7,9 +7,45 @@
  * 这里只保留可脱离磁盘测试的纯函数。
  */
 import { classifyFiles, classifyFile, pickUniqueName, type FileClassifyEntry, type RuleTable } from './classify';
+import { normalizeCategoryPath } from './rules';
 
 export { pickUniqueName, splitFileName, MAX_RENAME_ATTEMPTS } from './classify';
 export type { UniqueNameResult, SplitName } from './classify';
+
+/* ---------------- 显式分类（这次「谁去哪个夹」由调用方给，不再按规则算） ---------------- */
+
+/**
+ * 一条显式分类：`source` 是原文件完整路径，`category` 是分类夹名（可多级，如 `照片\风光`）。
+ *
+ * 用在哪：AI 分好之后直接按它的结论落盘（不必先翻译成规则再绕一圈）。
+ * 只有**原本会按规则分类的那些文件**才看这张表；子文件夹里的文件仍原样保留，
+ * 所以它替换的只是「按规则算分类名」这一步，其余规矩（同名下沉 / 各归各 / 不覆盖）一条不变。
+ */
+export interface CategoryAssignment {
+  source: string;
+  category: string;
+}
+
+/**
+ * 把显式分类清单收成一张表：小写完整路径 → **归一化之后**的分类路径。
+ *
+ * 归一化用规则那套（与「规则里写的分类名」同一个函数）：非法 / 危险的分类名
+ * （绝对路径、`..` 跳出、Windows 保留字…）**不进表** —— 那个文件自然回落到按规则算，
+ * 绝不会因为模型给了个危险名字就写到源文件夹树之外。
+ */
+export function categoryTableOf(
+  list: readonly CategoryAssignment[] | null | undefined,
+): Map<string, string> {
+  const table = new Map<string, string>();
+  for (const item of list ?? []) {
+    const source = String(item?.source ?? '').trim();
+    if (source.length === 0) continue;
+    const normalized = normalizeCategoryPath(String(item?.category ?? ''));
+    if (!normalized.ok || normalized.path.length === 0) continue;
+    table.set(source.toLowerCase(), normalized.path);
+  }
+  return table;
+}
 
 /** 目标路径拼接：输出根 + 分类文件夹 + 最终文件名 */
 export function targetPathFor(outputDir: string, folder: string, fileName: string): string {

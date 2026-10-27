@@ -269,6 +269,8 @@ function makeElement(id) {
     },
     setAttribute(name, value) {
       this.attrs.set(name, String(value));
+      // SVG 那边是用 setAttribute('class', …) 写的，桩里顺手同步到 className，好让断言按类名找得到
+      if (String(name) === 'class') this.className = String(value);
     },
     getAttribute(name) {
       return this.attrs.has(name) ? this.attrs.get(name) : null;
@@ -308,6 +310,13 @@ function makeElement(id) {
     set(v) {
       _text = v === undefined || v === null ? '' : String(v);
       if (_text === '') el.children.length = 0;
+    },
+    enumerable: true,
+  });
+  // 界面画关系链球时会问「画布里的第一个孩子是不是那个 <svg>」，桩里也得答得上来
+  Object.defineProperty(el, 'firstElementChild', {
+    get() {
+      return el.children.length > 0 ? el.children[0] : null;
     },
     enumerable: true,
   });
@@ -512,6 +521,13 @@ async function runInWindowStub(source, label, organizer) {
       e.tagName = String(tag).toUpperCase();
       return e;
     },
+    // 关系链球是 SVG 画的：桩里也要有 createElementNS，才能走到真产物那条路
+    createElementNS(ns, tag) {
+      const e = makeElement('');
+      e.tagName = String(tag).toUpperCase();
+      e.namespaceURI = ns;
+      return e;
+    },
   };
   const windowEl = makeElement('window');
   const windowStub = {
@@ -539,7 +555,13 @@ async function runInWindowStub(source, label, organizer) {
 
   try {
     const mod = new vm.SourceTextModule(source, { identifier: label });
-    await mod.link(() => {
+    await mod.link((specifier) => {
+      // 允许界面引用自己的纯数据模块（关系链球模型）；其它任何 import 一律不许
+      if (specifier === './planGraph.js') {
+        const dir = process.env.DSH_ACCEPT_OUT || path.join(__dirname, '..', 'out');
+        const target = path.join(dir, 'renderer', specifier);
+        return new vm.SourceTextModule(fs.readFileSync(target, 'utf8'), { identifier: target });
+      }
       throw new Error(`${label} must not import anything at load time`);
     });
     await mod.evaluate();
@@ -694,6 +716,18 @@ function findNotNestedEvidence(treeEl, segments) {
   return inside.length > 0
     ? []
     : [`「${segments[segments.length - 1]}」没有嵌在「${segments[0]}」里面（看起来是并列的两行）`];
+}
+
+/**
+ * 反证样本：从**真产物**身上抽掉「按分隔符拆父子」那一步，
+ * 于是「照片\风光」被当成一个名字、两颗球并列挂在源文件夹下（两层不再嵌套）。
+ * 同一套判据必须判它失败，否则探针是死的。
+ */
+function withoutNestedBalls(source) {
+  let out = source;
+  out = out.split("const parts = c.catPath.split('\\\\');").join('const parts = [];');
+  out = out.split('label: c.name,').join('label: c.catPath,');
+  return out;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1044,8 +1078,9 @@ function findNotNestedEvidence(treeEl, segments) {
       ok(!stub.error, `界面产物在窗口桩里没跑完：${stub.error}`);
       const fileCount = stub.elements.get('file-count');
       const ruleList = stub.elements.get('rule-list');
-      const previewTree = stub.elements.get('preview-tree');
-      ok(!!ruleList && !!previewTree, '桩里没有规则表 / 预览树这两个容器');
+      // 新界面的预览不再是文件树，而是一张关系链球画布（#plan-canvas 里的 <svg>）
+      const previewTree = stub.elements.get('plan-canvas');
+      ok(!!ruleList && !!previewTree, '桩里没有规则表 / 预览画布这两个容器');
 
       // ① 加入源文件夹（走界面自己的按钮，不直接改内部状态）
       stub.windowStub.organizer.pickFolders = async () => [root];
@@ -1095,44 +1130,60 @@ function findNotNestedEvidence(treeEl, segments) {
       await flush();
       await flush();
       const previewBtn = stub.elements.get('preview');
-      const noticeEl = stub.elements.get('notice');
+      const noticeEl = stub.elements.get('plan-notice');
       previewBtn.dispatch('click');
-      await flush();
-      await flush();
-      await flush();
+      for (let i = 0; i < 12; i++) await flush();
       ok(
         (org.state.previewCalls || []).length > 0,
-        `点「预览」没有走到 api.preview（预览树是空的，文字=${JSON.stringify(textOf(previewTree))}；` +
+        `点「预览」没有走到 api.preview（画布是空的；` +
           `按钮监听器=${(previewBtn.listeners.get('click') || []).length}；界面提示=${JSON.stringify(String(noticeEl.textContent))}）`,
       );
       ok(
         (previewTree.children || []).length > 0,
-        `预览树一个节点都没有（提示=${JSON.stringify(String(noticeEl.textContent))}；` +
-          `第一次预览的 roots=${JSON.stringify(org.state.previewCalls[0].roots)}；` +
-          `根节点=${(previewTree.children || []).map((c) => c.className).join(' | ')}）`,
+        `预览画布一个节点都没有（提示=${JSON.stringify(String(noticeEl.textContent))}；` +
+          `第一次预览的 roots=${JSON.stringify(org.state.previewCalls[0].roots)}）`,
       );
       const previewOutcome = org.state.previewCalls[org.state.previewCalls.length - 1];
       ok(
         Array.isArray(previewOutcome.roots) && previewOutcome.roots.length === 1,
         `界面点预览时没有把源文件夹交给后台（roots=${JSON.stringify(previewOutcome.roots)}）`,
       );
-      const cats = findByClass(previewTree, 'cat');
-      const catNames = cats.map((node) => nodeLabel(node));
-      ok(catNames.includes(normalized.segments[0]), `预览里没有「${normalized.segments[0]}」这一层：${catNames.join(' | ')}`);
-      ok(catNames.includes(normalized.segments[1]), `预览里没有「${normalized.segments[1]}」这一层：${catNames.join(' | ')}`);
-      for (const name of catNames) ok(!name.includes('\\'), `预览里有一层目录名带着分隔符：${name}`);
-      eq(findNotNestedEvidence(previewTree, normalized.segments).length, 0, findNotNestedEvidence(previewTree, normalized.segments).join('；'));
-      const previewText = textOf(previewTree);
-      ok(previewText.includes('散1.jpg'), `预览树里没看到那个文件：${previewText}`);
-      // 预览树里的目录链必须与 core 计划里那条链一致（不是脚本自己猜的）
+
+      // ④.1 分类球：两层必须是**两颗球**（不是一颗名字里带分隔符的球）
+      const catBalls = findByClass(previewTree, 'ball-category');
+      const catLabels = catBalls.map((b) => String(b.getAttribute('data-label') || ''));
+      ok(catLabels.length >= 2, `分类球数量不对（该有两层）：${catLabels.join(' | ') || '（一颗都没有）'}`);
+      ok(catLabels.includes(normalized.segments[0]), `画布上没有「${normalized.segments[0]}」那颗球：${catLabels.join(' | ')}`);
+      ok(catLabels.includes(normalized.segments[1]), `画布上没有「${normalized.segments[1]}」那颗球：${catLabels.join(' | ')}`);
+      for (const name of catLabels) ok(!name.includes('\\'), `画布上有一颗球的名字里带着分隔符：${name}`);
+
+      // ④.2 层级：内层那颗球的父球就是外层那颗（连线据它画出来）
+      const outerBall = catBalls.find((b) => b.getAttribute('data-label') === normalized.segments[0]);
+      const innerBall = catBalls.find((b) => b.getAttribute('data-label') === normalized.segments[1]);
+      ok(!!outerBall && !!innerBall, '找不到内外两层分类球');
+      const innerParent = String(innerBall.getAttribute('data-parent') || '');
+      eq(innerParent, String(outerBall.getAttribute('data-ball') || ''), '内层分类球的父球该是外层那颗');
+
+      // ④.3 那个文件挂在最内层那颗球下面
+      const fileBalls = findByClass(previewTree, 'ball-file');
+      const fileBall = fileBalls.find((b) => String(b.getAttribute('data-label') || '') === '散1.jpg');
+      ok(!!fileBall, `画布上没有那个文件的球：${fileBalls.map((b) => b.getAttribute('data-label')).join(' | ')}`);
+      eq(
+        String(fileBall.getAttribute('data-parent') || ''),
+        String(innerBall.getAttribute('data-ball') || ''),
+        '文件球该挂在最内层那颗分类球下面',
+      );
+      // 预览球上的路径写上来了（鼠标悬停就是这条路），与 core 计划里那条链一致
+      const innerText = textOf(innerBall);
+      ok(innerText.includes(normalized.segments[1]), `最内层那颗球上没写出「${normalized.segments[1]}」：${innerText}`);
+      // 画布里的目录链必须与 core 计划里那条链一致（不是脚本自己猜的）
       const plan = core.planFolders({ roots: [root], outputDir: c.out, rules: [{ ...makeRule('r1', ruleName, ['jpg']) }] }).plan;
       const plannedSegs = plan.files[0].targetDir.slice(path.join(c.out, '来源').length + 1).split(/[\\/]+/);
       eq(plannedSegs.join('|'), normalized.segments.join('|'), '计划里那条目录链与规则归一化结果不一致');
-      eq(previewText.includes(normalized.segments[1]), true, '预览里没写出最内层那一段');
 
       // ⑤ 真的整理一次：输出里确实出现两层（走界面自己的按钮）
       const before = countTree(c.out);
-      const startBtn = stub.elements.get('start');
+      const startBtn = stub.elements.get('plan-confirm');
       ok(startBtn.disabled !== true, '「开始整理」按钮被禁用了（方向校验该是允许的）');
       startBtn.dispatch('click');
       // 真整理是异步落盘，等它落地（最多 5 秒；等不到下面就会带着证据判失败）
@@ -1156,23 +1207,48 @@ function findNotNestedEvidence(treeEl, segments) {
       );
       ok(fs.existsSync(srcFile), '原文件被动了');
 
-      // ⑥ 探针必须是活的：拿「把 照片\风光 当成一个目录名」的产物喂给同一套断言，必须判失败
-      const flatStub = await runInWindowStub(FLAT_CATEGORY_PRODUCT, 'renderer(flat-category bait)', makeOrganizer({ files: { [srcFile]: true }, roots: [root], outputDir: c.out }).api);
+      // ⑥ 探针必须是活的：拿「把 照片\风光 当成一个名字、两层不嵌套」的产物喂给同一套断言，必须判失败。
+      //    样本从真产物身上抽：把「分类名按 \ 拆成父子」那一步退化成「整串当一个名字」。
+      const flatSource = withoutNestedBalls(rendererSource);
+      ok(flatSource !== rendererSource, '没能造出「把多层分类名当成一个名字」的产物样本');
+      const flatOrg = makeOrganizer({ files: { [srcFile]: true }, roots: [root], outputDir: c.out });
+      // 规则表直接就是「照片\风光」那条：探针只抽「按分隔符拆父子」这一处，别的都照旧
+      flatOrg.api.loadRules = async () => ({
+        ok: true,
+        rules: [{ ...makeRule('r1', ruleName, ['jpg']) }],
+        source: 'user',
+        message: 'stub',
+        filePath: 'stub',
+      });
+      const flatStub = await runInWindowStub(flatSource, 'renderer(flat-category bait)', flatOrg.api);
       try {
         ok(!flatStub.error, `反证产物自己都没跑起来（那样探针不算活的）：${flatStub.error}`);
-        const flatTree = flatStub.elements.get('preview-tree');
         flatStub.windowStub.organizer.pickFolders = async () => [root];
         flatStub.elements.get('pick-folders').dispatch('click');
         await flush();
         await flush();
+        flatStub.elements.get('pick-out').dispatch('click');
+        await flush();
+        await flush();
         flatStub.elements.get('preview').dispatch('click');
-        await flush();
-        await flush();
-        await flush();
-        const flatEvidence = findFlatCategoryEvidence(flatTree, normalized.segments);
-        ok(flatEvidence.length > 0, '反证产物（把多层分类名当成一个目录名）居然通过了探针 —— 探针是死的');
-        const flatNest = findNotNestedEvidence(flatTree, normalized.segments);
-        ok(flatNest.length > 0, '反证产物（两层并列、没有嵌套）居然通过了「必须嵌套」那条 —— 探针是死的');
+        for (let i = 0; i < 12; i++) await flush();
+        const flatCanvas = flatStub.elements.get('plan-canvas');
+        const flatCats = findByClass(flatCanvas, 'ball-category');
+        const flatLabels = flatCats.map((b) => String(b.getAttribute('data-label') || ''));
+        // 证据一：有一颗球的名字里带着分隔符（整串被当成一个目录名）
+        const flatJoined = flatLabels.filter((n) => n.includes('\\'));
+        ok(
+          flatJoined.length > 0,
+          `反证产物（把多层分类名当成一个目录名）居然通过了探针 —— 探针是死的（球名=${flatLabels.join(' | ') || '（一颗都没有）'}）`,
+        );
+        // 证据二：两层不再嵌套
+        const flatOuter = flatCats.find((b) => b.getAttribute('data-label') === normalized.segments[0]);
+        const flatInner = flatCats.find((b) => b.getAttribute('data-label') === normalized.segments[1]);
+        const flatNested =
+          !!flatOuter &&
+          !!flatInner &&
+          String(flatInner.getAttribute('data-parent') || '') === String(flatOuter.getAttribute('data-ball') || '');
+        ok(!flatNested, '反证产物（两层不嵌套）居然通过了「必须嵌套」那条 —— 探针是死的');
       } finally {
         flatStub.restore();
       }

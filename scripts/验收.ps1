@@ -22,7 +22,9 @@
 #     预览里能看出「哪条散文件沉到了哪一层、沉了几层」；
 #     含「探针有效性自检」：拿内存里现造的「只并一层、不递归往下沉」的产物必须判失败）
 #  10 撤销上一次整理  accept-undo-test.js -> 撤销OK（纯逻辑，真造临时目录与文件：
-#     正常撤销/幂等/不删用户后加的东西/不删被改过的文件/删除失败不崩/跨重启可用/绝不越界）
+#     正常撤销/幂等/不删用户后加的东西/不删被改过的文件/删除失败不崩/跨重启可用/绝不越界；
+#     **输出根目录本身永不删除**（只清它下面由程序新建、且变空的分类夹），
+#     并核对该次撤销的删除审计日志真的记下了删了什么）
 #  11 输出方向        accept-output-direction-test.js -> 输出方向OK（纯逻辑 + 界面接线：
 #     输出=源、输出在源之下、输出是源的上一级 一律不许开工且一个字节都不写；
 #     正常方向允许并真跑一次；散文件只校验「输出 != 文件所在目录」；含「探针有效性自检」）
@@ -31,9 +33,10 @@
 #     调用时把全局联网入口换成会抛错的哨兵，调完哨兵没被碰过；不写盘不删东西；接口形状齐全且产品里没有第二处 AI 实现；
 #     含「探针有效性自检」：偷偷塞 fetch / 读环境变量 / 别处另抄一份实现的产物必须判失败）
 #  13 AI 界面壳        accept-ai-ui-test.js -> AI界面壳OK（界面接线，真 ES module 在窗口式桩里真执行：
-#     界面上有常显的「AI 分类：未配置」；点「换一种分法：AI 分类」必须**先撤销、后 AI**（桩里记调用序列）；
+#     界面上有常显的「AI 分类：未配置」；**没分拣过也能直接用 AI 分法**（不撤销、不删东西、直接调 AI）；
+#     只有「上一次整理就留在同一个输出目录里」时才先撤销，且撤销必须排在调 AI 之前（桩里记调用序列）；
 #     撤销成功 + AI 未配置 → 界面说清「已撤销 N 个 + AI 分类还没配置」；真造临时目录验「输出里那份被撤掉、源文件一个没动」；
-#     再点一次只给提示、不删东西、不再调 AI；撤销返回失败 → 不继续调 AI 且如实显示撤销报告；
+#     已经撤销过 / 在别的输出目录 → 不拦人、直接调 AI；撤销返回失败 → 不继续调 AI 且如实显示撤销报告；
 #     含「探针有效性自检」：内存里现造的「先调 AI、后撤销」的产物必须判失败）
 #  14 AI 真调用        accept-ai-live-test.js -> AI真调用OK（**本机假接口服务**，不依赖外网：
 #     起一个 node 内建 http 的假服务（127.0.0.1 随机端口，形状模仿 OpenAI 兼容的 chat completions），
@@ -57,6 +60,19 @@
 #     界面侧：规则行显示归一化后的实际目标、预览树里多层结构被真的画成两层/三层；
 #     含「探针有效性自检」：内存里现造的「把 照片\风光 当成一个目录名」的产物必须判失败）
 #
+#  18 AI 分类落地    accept-ai-organize-test.js -> AI分类落地OK（纯逻辑，真造临时目录与文件：
+#     AI 分好的「文件 → 分类」直接用于落盘（不先翻译成规则）：给了分类的按它落（含多级），没给的按规则回落；
+#     源文件夹模式下只改「本来会建分类夹」的散文件，子文件夹里的文件仍原样保留；
+#     危险分类名（..\..\外面 / C:\temp\x / CON）一律不进表 → 回落规则，源树之外哨兵不变；
+#     输出方向校验、撤销、预览与落盘一致这三条照旧；
+#     含「探针有效性自检」：抽掉 assignments 再跑一遍，落点必须变回按规则）
+#
+#  19 AI 结构          accept-ai-structure-test.js -> AI结构OK（纯逻辑 + 本机假接口服务：
+#     **原文件夹已有的目录结构当分类方案**：从文件相对路径读出「票据 / 文档」这类已有分类（只发相对目录名，
+#     不发绝对路径、不发盘符）；提示词里写明「优先放进已有分类、名字一字不差」；
+#     真调用后落盘验「AI 分进来的散文件与原来就在那个夹子里的老文件落进同一个文件夹」；
+#     含「探针有效性自检」：抽掉源文件夹再跑一遍（旧行为），同一套判据必须判失败）
+#
 #  17 热加载          accept-dev-hot-reload-test.js -> 热加载OK（真跑一次 npm run dev，不依赖真窗口：
 #     `npm run dev` 能启动、打印「热加载就绪」、之后一直活着（沙箱里窗口起不来时它要明确打印
 #     「窗口起不来（沙箱环境），热加载仍可用」并继续监听）；
@@ -66,6 +82,15 @@
 #     跑完临时改动全部还原、工作区回到跑之前的样子（含未跟踪文件）、没有新增被 git 跟踪的文件；
 #     `npm run build` 仍然成功；含「探针有效性自检」：现造的「起来就退出」与「假装热加载但不重编译」
 #     两个假 dev 喂给同一套断言必须判失败）
+#
+#  20 删源文件        accept-delete-sources-test.js -> 删源文件OK（纯逻辑，真造临时目录与文件）：
+#  21 软件图标        accept-icon-test.js -> 图标OK（纯逻辑：SVG/PNG/ICO 结构合法 + 接线没断 + 坏样本反证）：
+#     这是全产品唯一一次「动用户的原始文件」：只删这一次整理里**复制成功**的那几个源文件；
+#     删之前逐个核对**输出里那份还在**（输出里那份被撤销/手删 → 跳过并说明，源文件必须留着）；
+#     默认走回收站（主进程传 shell.trashItem），**给不出回收站能力时一个都不删**；
+#     目录只 rmdir（只在空的时候成功）—— 里面还有东西就留着；源文件夹里用户后来加的文件一个都不碰；
+#     幂等（删过一次再点只回一句人话、不再动手）；每个动作都写一行删除审计；
+#     含「探针有效性自检」：「不看输出就删」的朴素实现必须在同一个场景里被判失败
 #
 # 编码约定：全链路 UTF-8。本脚本与 node 子进程之间按 UTF-8 走，日志也是 UTF-8，
 # 所以看日志别按 GBK 解（那是乱码）。判定逻辑只看退出码 + 日志里的 ASCII 标记，与编码无关。
@@ -549,10 +574,54 @@ try {
   Write-Host "嵌套规则测试异常：$($_.Exception.Message)"
 }
 
-# ---------- 第 17 条：热加载（真跑一次 npm run dev，不依赖真窗口） ----------
+# ---------- 第 17 条：AI 分类落地（AI 分好的结论直接预览 / 分拣 / 撤销，不经过规则表） ----------
+$aiOrganizeOk = $false
+try {
+  Write-Step '--- 17/18 AI 分类落地 ---'
+  $aiOrgTestJs = Join-Path $stage 'accept-ai-organize-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-ai-organize-test.js') -Destination $aiOrgTestJs -Force
+  $aiOrgLog = Join-Path $stage 'accept-ai-organize.log'
+  # 纯逻辑（不碰界面、不联网）：真造临时目录与文件，把「显式分类」跑完整条落盘链路
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node $aiOrgTestJs *> $aiOrgLog
+  $aiOrgCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $aiOrgLog -Encoding UTF8 -Tail 35 | ForEach-Object { Write-Host $_ }
+  Write-Host "AI分类落地测试退出码=$aiOrgCode  日志=$aiOrgLog"
+  if ($aiOrgCode -eq 0 -and ((Get-Content -LiteralPath $aiOrgLog -Encoding UTF8 -Raw) -match 'AI分类落地OK')) {
+    Write-Step 'AI分类落地OK'
+    $aiOrganizeOk = $true
+  }
+} catch {
+  Write-Host "AI分类落地测试异常：$($_.Exception.Message)"
+}
+
+# ---------- 第 18 条：AI 结构（原文件夹已有目录结构当分类方案） ----------
+$aiStructureOk = $false
+try {
+  Write-Step '--- 18/19 AI 结构 ---'
+  $aiStructTestJs = Join-Path $stage 'accept-ai-structure-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-ai-structure-test.js') -Destination $aiStructTestJs -Force
+  $aiStructLog = Join-Path $stage 'accept-ai-structure.log'
+  # 纯逻辑 + 本机假接口服务（127.0.0.1，不出本机）；设置只活在内存里，不碰用户真实设置
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node $aiStructTestJs *> $aiStructLog
+  $aiStructCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $aiStructLog -Encoding UTF8 -Tail 35 | ForEach-Object { Write-Host $_ }
+  Write-Host "AI结构测试退出码=$aiStructCode  日志=$aiStructLog"
+  if ($aiStructCode -eq 0 -and ((Get-Content -LiteralPath $aiStructLog -Encoding UTF8 -Raw) -match 'AI结构OK')) {
+    Write-Step 'AI结构OK'
+    $aiStructureOk = $true
+  }
+} catch {
+  Write-Host "AI结构测试异常：$($_.Exception.Message)"
+}
+
+# ---------- 第 19 条：热加载（真跑一次 npm run dev，不依赖真窗口） ----------
 $hotReloadOk = $false
 try {
-  Write-Step '--- 17/17 热加载 ---'
+  Write-Step '--- 19/19 热加载 ---'
   $hotTestJs = Join-Path $stage 'accept-dev-hot-reload-test.js'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-dev-hot-reload-test.js') -Destination $hotTestJs -Force
   $hotLog = Join-Path $stage 'accept-dev-hot-reload.log'
@@ -593,7 +662,49 @@ try {
   Write-Host "热加载测试异常：$($_.Exception.Message)"
 }
 
-if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview -and $undoOk -and $directionOk -and $aiStrategyOk -and $aiUiOk -and $aiLiveOk -and $aiConfigOk -and $nestedRulesOk -and $hotReloadOk) {
+# ---------- 第 20 条：删源文件（纯逻辑，真造临时目录与文件） ----------
+$deleteSourcesOk = $false
+try {
+  Write-Step '--- 20/20 删源文件 ---'
+  $delSrcTestJs = Join-Path $stage 'accept-delete-sources-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-delete-sources-test.js') -Destination $delSrcTestJs -Force
+  $delSrcLog = Join-Path $stage 'accept-delete-sources.log'
+  # 纯逻辑（不碰界面、不联网）：记录与审计一律走临时路径，绝不碰用户 userData 下的真实记录
+  $env:DSH_ACCEPT_OUT = $outDir
+  & node $delSrcTestJs *> $delSrcLog
+  $delSrcCode = $LASTEXITCODE
+  Remove-Item Env:\DSH_ACCEPT_OUT -ErrorAction SilentlyContinue
+  Get-Content -LiteralPath $delSrcLog -Encoding UTF8 -Tail 35 | ForEach-Object { Write-Host $_ }
+  Write-Host "删源文件测试退出码=$delSrcCode  日志=$delSrcLog"
+  if ($delSrcCode -eq 0 -and ((Get-Content -LiteralPath $delSrcLog -Encoding UTF8 -Raw) -match '删源文件OK')) {
+    Write-Step '删源文件OK'
+    $deleteSourcesOk = $true
+  }
+} catch {
+  Write-Host "删源文件测试异常：$($_.Exception.Message)"
+}
+
+# ---------- 第 21 条：软件图标（纯逻辑：图标文件合法 + 接线没断 + 探针反证） ----------
+$iconOk = $false
+try {
+  Write-Step '--- 21/21 软件图标 ---'
+  $iconTestJs = Join-Path $stage 'accept-icon-test.js'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'accept-icon-test.js') -Destination $iconTestJs -Force
+  $iconLog = Join-Path $stage 'accept-icon.log'
+  # 只读 assets / out / src 的产物文件，不联网、不碰窗口
+  & node $iconTestJs *> $iconLog
+  $iconCode = $LASTEXITCODE
+  Get-Content -LiteralPath $iconLog -Encoding UTF8 -Tail 30 | ForEach-Object { Write-Host $_ }
+  Write-Host "图标测试退出码=$iconCode  日志=$iconLog"
+  if ($iconCode -eq 0 -and ((Get-Content -LiteralPath $iconLog -Encoding UTF8 -Raw) -match '图标OK')) {
+    Write-Step '图标OK'
+    $iconOk = $true
+  }
+} catch {
+  Write-Host "图标测试异常：$($_.Exception.Message)"
+}
+
+if ($logic -and $copy -and $alive -and $preview -and $dropPath -and $ruleEngine -and $ruleEditor -and $folderPlan -and $folderPreview -and $undoOk -and $directionOk -and $aiStrategyOk -and $aiUiOk -and $aiLiveOk -and $aiConfigOk -and $nestedRulesOk -and $aiOrganizeOk -and $aiStructureOk -and $hotReloadOk -and $deleteSourcesOk -and $iconOk) {
   Write-Step '验收通过'
   exit 0
 }
@@ -615,5 +726,9 @@ if (-not $aiUiOk) { $failedSteps += 'AI界面壳' }
 if (-not $aiLiveOk) { $failedSteps += 'AI真调用' }
 if (-not $aiConfigOk) { $failedSteps += 'AI配置' }
 if (-not $nestedRulesOk) { $failedSteps += '嵌套规则' }
+if (-not $aiOrganizeOk) { $failedSteps += 'AI分类落地' }
+if (-not $aiStructureOk) { $failedSteps += 'AI结构' }
 if (-not $hotReloadOk) { $failedSteps += '热加载' }
+if (-not $deleteSourcesOk) { $failedSteps += '删源文件' }
+if (-not $iconOk) { $failedSteps += '软件图标' }
 Fail ($failedSteps -join '+')

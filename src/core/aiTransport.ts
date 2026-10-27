@@ -17,6 +17,7 @@ import * as http from 'http';
 import * as https from 'https';
 import * as dns from 'dns';
 import {
+  chatCompletionsPath,
   installAiWire,
   type AiWireGate,
   type AiWireOutcome,
@@ -96,12 +97,18 @@ function callOnce(input: {
       method: 'POST',
       headers,
       timeout: timeoutMs,
-      // 只按 IPv4 解析（本机服务常只有 IPv4）
-      lookup: (hostname, _opts, callback) => {
-        dns.lookup(hostname, { family: 4 }, (err, address, family) =>
-          callback(err, address as string, (family ?? 4) as number),
-        );
-      },
+    // 只按 IPv4 解析（本机服务常只有 IPv4）。
+    // ⚠️ Node 20+ 的 net 会用 `all: true` 来问「这个主机的全部地址」，
+    // 这时回调必须是 (err, addresses[]) 的形状；只回一个字符串会被判成
+    // `ERR_INVALID_IP_ADDRESS`（真实域名必炸、127.0.0.1 这类 IP 字面量不走 lookup 所以测不出来）。
+    lookup: (hostname, lookupOptions, callback) => {
+      const wantAll = Boolean((lookupOptions as dns.LookupOptions | undefined)?.all);
+      dns.lookup(hostname, { family: 4, all: wantAll } as dns.LookupOptions, (err, address, family) => {
+        const done = callback as unknown as (...args: unknown[]) => void;
+        if (wantAll) done(err, address);
+        else done(err, address, family ?? 4);
+      });
+    },
     };
 
     try {
@@ -188,7 +195,7 @@ export async function testAiConnection(
       { role: 'user', content: '请只回一个 JSON 对象：{"测试": []}' },
     ],
   });
-  const pathSuffix = /\/v1$/i.test(endpoint) ? '/chat/completions' : '/v1/chat/completions';
+  const pathSuffix = chatCompletionsPath(endpoint);
   const outcome = await callOnce({ endpoint, authToken, path: pathSuffix, body, timeoutMs });
   if (!outcome.ok) return { ok: false, message: `连不上：${outcome.error ?? '未知原因'}` };
   return { ok: true, message: `连接成功：${model || '这个模型'} 回话了` };

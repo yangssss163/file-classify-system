@@ -83,7 +83,7 @@ try {
   for (const f of srcFiles) expectedByPath.set(f, core.classifyFile(f));
 
   const previewByPath = new Map();
-  for (const f of tree.files) previewByPath.set(f.path, f);
+  for (const f of tree.files) previewByPath.set(f.fullPath, f);
 
   assert.strictEqual(tree.files.length, srcFiles.length, `预览明细条数期望 ${srcFiles.length}，实际 ${tree.files.length}`);
   for (const f of srcFiles) {
@@ -108,11 +108,11 @@ try {
         `分组 ${group.folder} 里混进了 ${f.folder} 的文件：${f.name}`,
       );
       assert.strictEqual(
-        core.classifyFile(f.path),
+        core.classifyFile(f.fullPath),
         group.folder,
-        `${f.name} 按分类规则应去 ${core.classifyFile(f.path)}，却被预览放进 ${group.folder}`,
+        `${f.name} 按分类规则应去 ${core.classifyFile(f.fullPath)}，却被预览放进 ${group.folder}`,
       );
-      seenInGroups.push(f.path);
+      seenInGroups.push(f.fullPath);
     }
   }
   assert.strictEqual(

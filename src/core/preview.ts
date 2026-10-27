@@ -7,7 +7,9 @@
  */
 import * as fssync from 'fs';
 import { baseName, extensionOf } from './classify';
-import { activeFolderNamesOf, type RuleTable } from './rules';import { classifyWithMeta } from './classifyWithMeta';
+import { activeFolderNamesOf, type RuleTable } from './rules';
+import { classifyWithMeta } from './classifyWithMeta';
+import { categoryTableOf, type CategoryAssignment } from './plan';
 import { describeError } from './copyFiles';
 import { checkOutputDirection, type OutputDirectionCheck } from './outputDirection';
 import {
@@ -32,8 +34,11 @@ export interface PreviewFileError {
 
 /** 预览树里的一个文件。`folder` 始终由现有分类规则给出，与读不到元信息与否无关。 */
 export interface PreviewFile {
-  /** 原文件路径 */
-  path: string;
+  /**
+   * 原文件路径。字段名不叫 `path`：界面产物里不许出现 `.path` 那种属性读法
+   * （那是 Electron 32 起被移除的 `File.path` 的写法），所以用一个更明确的名字。
+   */
+  fullPath: string;
   /** 文件名（含后缀） */
   name: string;
   /** 小写后缀，不含点；无后缀为 '' */
@@ -248,6 +253,11 @@ export interface PreviewBuildOptions {
   /** 分类规则表；不传就用默认规则（按后缀分五类）。与实际整理必须是同一套。 */
   rules?: RuleTable | null;
   /**
+   * 显式分类（源文件完整路径 → 分类名）：这次「谁去哪个夹」已经定好时用它，比如 AI 分完先看一遍。
+   * 没列进来的文件仍按规则算；只影响「原本就会进分类夹」的散文件。
+   */
+  assignments?: readonly CategoryAssignment[] | null;
+  /**
    * 是否探测文件元信息（默认 true，只读 stat，不写盘）。
    * 置为 false 时所有文件都按「可读」记，用于不碰磁盘的纯计算场合。
    */
@@ -331,6 +341,8 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
 
   const checkReadable = options?.checkReadable !== false;
   const rules = options?.rules ?? null;
+  /** 这次谁去哪个夹如果已经定好（AI 分完），就按它算，别再用规则算一遍。 */
+  const assignedTable = categoryTableOf(options?.assignments);
   // 分类：与真正执行复制时**同一个求值函数**（大小/时间条件要真读属性）
   // 明细汇总（`entries`）顺序与输入一致，便于「预览 vs 实际」逐条核对；
   // 顶层那份「按分类汇总」由 `buildCategoryTree()` 按分类**路径**逐层搭出来（见下）。
@@ -341,7 +353,7 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
 
   if (tracked) {
     // 展开 + 算目标路径：与「开始整理」走同一个 planFolders（只读，绝不建目录）
-    const outcome = planFolders({ roots, outputDir: String(outputDir), rules });
+    const outcome = planFolders({ roots, outputDir: String(outputDir), rules, assignments: options?.assignments ?? null });
     plan = outcome.plan;
     tree = outcome.tree;
   }
@@ -350,7 +362,7 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
   const previewItemOf = (filePath: string, folder: string): PreviewFile => {
     const probe = probeFile(filePath, checkReadable);
     return {
-      path: filePath,
+      fullPath: filePath,
       name: baseName(filePath),
       ext: extensionOf(filePath),
       folder,
@@ -371,8 +383,9 @@ export function buildPreviewTree(options: PreviewBuildOptions): PreviewOutcome {
   } else {
     for (const raw of files) {
       const p = String(raw);
-      const matched = classifyWithMeta(rules, p);
-      entries.push(previewItemOf(p, matched.folder));
+      const given = assignedTable.get(p.toLowerCase());
+      const matched = given ? null : classifyWithMeta(rules, p);
+      entries.push(previewItemOf(p, given ?? matched!.folder));
     }
   }
 

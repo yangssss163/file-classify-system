@@ -262,7 +262,13 @@ async function runInWindowStub(source, label, organizer, confirmAnswer) {
 
   try {
     const mod = new vm.SourceTextModule(source, { identifier: label });
-    await mod.link(() => {
+    await mod.link((specifier) => {
+      // 允许界面引用自己的纯数据模块（关系链球模型）；其它任何 import 一律不许
+      if (specifier === './planGraph.js') {
+        const dir = process.env.DSH_ACCEPT_OUT || path.join(__dirname, '..', 'out');
+        const target = path.join(dir, 'renderer', specifier);
+        return new vm.SourceTextModule(fs.readFileSync(target, 'utf8'), { identifier: target });
+      }
       throw new Error(`${label} must not import anything at load time`);
     });
     await mod.evaluate();
@@ -387,6 +393,9 @@ function withoutDirectionGate(source) {
   let out = source;
   out = out.split('gateCheck = tree.outputDirection;').join('void 0;');
   out = out.split('const blocked = gateCheck.ok !== true;').join('const blocked = false;');
+  // 新界面在「生成方案」「确认分拣」两处都各有一道出口；抽校验就必须两道一起抽掉
+  out = out.split('if (gate && gate.ok !== true) {').join('if (false) {');
+  out = out.split('if (before && before.ok !== true) {').join('if (false) {');
   return out;
 }
 
@@ -409,36 +418,37 @@ async function observeUi(productSource, label, ctx, scenario) {
 
     if (s.drop !== false) {
       dropFolder(run, ctx.root);
-      await flush();
-      await flush();
+      for (let i = 0; i < 8; i++) await flush();
     }
     if (s.pickOutputDir !== false) {
       const pickOut = run.elements.get('pick-out');
       if (!pickOut) out.problems.push('element never looked up: #pick-out');
       else pickOut.dispatch('click', { preventDefault() {} });
-      await flush();
-      await flush();
-      await flush();
+      for (let i = 0; i < 8; i++) await flush();
     }
     if (s.preview !== false) {
       const previewBtn = run.elements.get('preview');
       if (!previewBtn) out.problems.push('element never looked up: #preview');
       else previewBtn.dispatch('click', { preventDefault() {} });
-      await flush();
-      await flush();
-      await flush();
+      // 生成方案这条链上有好几个 await（方向校验 → 源文件夹 → 预览），多等几拍
+      for (let i = 0; i < 12; i++) await flush();
     }
 
     out.outputText = String((run.elements.get('out-dir') || {}).textContent || '');
-    out.warningText = String((run.elements.get('preview-warning') || {}).textContent || '');
+    // 新界面里「不能开工」那条红条在分拣台上（#plan-warning），同一条提示也会落到 #plan-notice；
+    // 断言只看「用户看得见的那几句」，两处合起来读。
+    out.warningText = [run.elements.get('plan-warning'), run.elements.get('plan-notice')]
+      .map((node) => String((node || {}).textContent || ''))
+      .filter((t) => t.length > 0)
+      .join(' ');
     out.noticeText = String((run.elements.get('notice') || {}).textContent || '');
     out.summaryText = String((run.elements.get('summary') || {}).textContent || '');
-    out.startDisabled = (run.elements.get('start') || {}).disabled === true;
-    out.previewText = run.elements.get('preview-tree') ? textOf(run.elements.get('preview-tree')) : '';
+    out.startDisabled = (run.elements.get('plan-confirm') || {}).disabled === true;
+    out.previewText = run.elements.get('plan-canvas') ? textOf(run.elements.get('plan-canvas')) : '';
 
     if (s.clickStart === true) {
-      const startBtn = run.elements.get('start');
-      if (!startBtn) out.problems.push('element never looked up: #start');
+      const startBtn = run.elements.get('plan-confirm');
+      if (!startBtn) out.problems.push('element never looked up: #plan-confirm');
       else startBtn.dispatch('click', { preventDefault() {} });
       // 整理是异步的（真在复制文件）：多等一会儿，等它把话说完
       for (let i = 0; i < 60; i++) await flush();

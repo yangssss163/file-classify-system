@@ -28,7 +28,13 @@ import {
   setSourceRoots,
   testAiConnection,
   undoLastRun,
+  deleteSourceFiles,
+  appendHistory,
+  makeTicketId,
+  readHistory,
+  HISTORY_FILE_NAME,
   RUN_RECORD_FILE_NAME,
+  RUN_AUDIT_FILE_NAME,
   RULES_FILE_NAME,
   summarizeLastRun,
   type CopyFileResult,
@@ -189,6 +195,16 @@ function createWindow(): void {
   const noWindow = process.argv.includes('--no-window');
   let win: BrowserWindow | null = null;
 
+  // 图标：构建时 copy-assets 把 assets/ 拷到 out/assets，所以从 out/main.js 出发找
+  //（缺了就静默退回 Electron 默认图标，别因为一个图标把窗口开不出来）
+  let iconPath: string | undefined;
+  try {
+    const candidate = path.join(__dirname, 'assets', 'icon.ico');
+    if (fs.existsSync(candidate)) iconPath = candidate;
+  } catch {
+    iconPath = undefined;
+  }
+
   if (!noWindow) {
     try {
       win = new BrowserWindow({
@@ -196,6 +212,7 @@ function createWindow(): void {
         height: 700,
         show: true,
         title: '文件批量整理器',
+        ...(iconPath ? { icon: iconPath } : {}),
         webPreferences: {
           preload: path.join(__dirname, 'preload.js'),
           contextIsolation: true,
@@ -263,6 +280,27 @@ ipcMain.handle('dialog:pickOutputDir', async (): Promise<string | null> => {
   return result.filePaths[0];
 });
 
+/* ---------------- 预览用的「显式分类」：放下来、用一次就清掉 ----------------
+ * 与 files:setSourceRoots 同一套路：界面在点「预览」之前把这次要用的显式分类（AI 分好的结论）放这儿，
+ * preview 读一次就清空，绝不残留给下一次。
+ * 为什么不让 preview 直接多一个参数：界面里那条 `api.preview(...)` 被验收第 7 条用字面量钉着（三参）。
+ */
+let pendingPreviewAssignments: { source: string; category: string }[] | null = null;
+
+ipcMain.handle('files:setPreviewAssignments', async (_event, payload: { assignments?: unknown }) => {
+  pendingPreviewAssignments = Array.isArray(payload?.assignments)
+    ? (payload?.assignments as { source: string; category: string }[])
+    : null;
+  return true;
+});
+
+/** 取走这一次的显式分类（取一次就清空）。 */
+function takePreviewAssignments(): { source: string; category: string }[] | null {
+  const taken = pendingPreviewAssignments;
+  pendingPreviewAssignments = null;
+  return taken;
+}
+
 /**
  * 递归展开文件夹（只读）：给界面一份「文件 + 每个文件的源文件夹归属 + 跳过原因」。
  * 只收文件、空文件夹不产生输出、读不了的子文件夹跳过并记原因、不跟随符号链接。
@@ -326,13 +364,42 @@ function runRecordFilePath(): string {
   return path.join(app.getPath('userData'), RUN_RECORD_FILE_NAME);
 }
 
+/**
+ * 删除审计日志的位置：和记录放在同一个目录（temp 重定向时也跟着走，验收不会污染用户真实日志）。
+ * 撤销时每删一个文件 / 目录都会往里记一行 —— 用户报过「目的文件夹消失了」，
+ * 有这个日志就能判断到底是不是程序干的。
+ */
+function deleteAuditFilePath(): string {
+  return path.join(path.dirname(runRecordFilePath()), RUN_AUDIT_FILE_NAME);
+}
+
 ipcMain.handle('undo:lastRun', async () => {
   return summarizeLastRun(loadRunRecord(runRecordFilePath()));
 });
 
 ipcMain.handle('undo:run', async () => {
-  const result = undoLastRun(runRecordFilePath());
+  const result = undoLastRun(runRecordFilePath(), { auditPath: deleteAuditFilePath() });
   return { result, summary: summarizeLastRun(loadRunRecord(runRecordFilePath())) };
+});
+
+/** 历史单号文件的位置（和记录同目录；验收时跟着 temp 走，不碰用户真实数据）。 */
+function historyFilePath(): string {
+  const override = process.env.DSH_HISTORY_FILE;
+  if (override && override.trim().length > 0) return path.resolve(override);
+  return path.join(path.dirname(runRecordFilePath()), HISTORY_FILE_NAME);
+}
+
+ipcMain.handle('history:list', async () => readHistory(historyFilePath()));
+
+/**
+ * 用户确认后，把这一次的源文件移到回收站。
+ * 真正删什么、不删什么全在 core/sourceDeletion.ts（这里只把「回收站」这个能力接上）。
+ */
+ipcMain.handle('files:deleteSources', async () => {
+  return deleteSourceFiles(runRecordFilePath(), {
+    trash: (target: string) => shell.trashItem(target),
+    auditPath: deleteAuditFilePath(),
+  });
 });
 
 /* ---------------- AI 分类的设置与调用（本片新增真实现） ----------------
@@ -455,7 +522,7 @@ ipcMain.handle(
   'ai:classify',
   async (
     event,
-    payload: { filePaths?: string[]; outputDir?: string | null },
+    payload: { filePaths?: string[]; outputDir?: string | null; roots?: string[] | null },
   ) => {
     const sender = event.sender;
     return aiClassifyByPaths(
@@ -465,6 +532,8 @@ ipcMain.handle(
       (done, total) => {
         if (!sender.isDestroyed()) sender.send('ai:progress', { done, total });
       },
+      // 源文件夹只用来读「原文件夹已有的目录结构」，当候选分类名（AI 在这个基础上分类）
+      payload?.roots ?? null,
     );
   },
 );
@@ -501,7 +570,13 @@ ipcMain.handle(
   'files:preview',
   async (
     _event,
-    payload: { files?: string[]; outputDir?: string | null; rules?: Rule[] | null },
+    payload: {
+      files?: string[];
+      outputDir?: string | null;
+      rules?: Rule[] | null;
+      /** 显式分类（AI 分完先看一遍时传）：不传就纯按规则 */
+      assignments?: { source: string; category: string }[] | null;
+    },
   ): Promise<PreviewOutcome> => {
     // 预览纯内存计算：只读 stat/readdir，不建目录、不写文件、不落任何临时产物。
     // 规则表由界面传进来（就是当前界面上那套规则），没传就用默认规则。
@@ -512,6 +587,8 @@ ipcMain.handle(
         files: payload?.files ?? [],
         outputDir: payload?.outputDir ?? null,
         rules: payload?.rules ?? null,
+        // 显式分类：直接用参数传的；没传就取「放下来那一批」（取一次就清空）
+        assignments: payload?.assignments ?? takePreviewAssignments(),
       });
     } catch (err) {
       return {
@@ -525,7 +602,17 @@ ipcMain.handle(
 
 ipcMain.handle(
   'files:organize',
-  async (event, payload: { files: string[]; roots?: string[]; outputDir: string; rules?: Rule[] | null }) => {
+  async (
+    event,
+    payload: {
+      files: string[];
+      roots?: string[];
+      outputDir: string;
+      rules?: Rule[] | null;
+      /** 显式分类（AI 分完直接整理时传）：不传就纯按规则 */
+      assignments?: { source: string; category: string }[] | null;
+    },
+  ) => {
     const sender = event.sender;
     const summary = await copyFiles({
       files: payload.files ?? [],
@@ -533,6 +620,10 @@ ipcMain.handle(
       outputDir: payload.outputDir,
       // 同一套规则：预览说哪个文件进哪个分类，执行结果必须一致
       rules: payload.rules ?? null,
+      // 显式分类（AI 分好的结论）：给了就不看规则、只按它落盘；没给的仍按规则
+      assignments: payload.assignments ?? null,
+      // 界面上确认的那份方案就是「最终定稿」：连用户手动挪过的子文件夹文件也要按它落盘
+      assignmentsAreFinal: true,
       // 记下这次复制出去的每一份（撤销的唯一依据）；写不进去只影响「能不能撤销」，不影响复制
       recordPath: runRecordFilePath(),
       onProgress: (done, total, result: CopyFileResult) => {
@@ -541,6 +632,22 @@ ipcMain.handle(
         }
       },
     });
+    // 记一张历史单（单号 / 时间 / 分法 / 几个文件 / 输出到哪儿）。写不进去不影响这次复制。
+    try {
+      const byAi = Array.isArray(payload.assignments) && payload.assignments.length > 0;
+      const now = new Date();
+      appendHistory(historyFilePath(), {
+        id: makeTicketId(now),
+        at: now.toISOString(),
+        mode: byAi ? 'ai' : 'rules',
+        fileCount: summary.total,
+        successCount: summary.successCount,
+        failureCount: summary.failureCount,
+        outputDir: summary.outputDir,
+      });
+    } catch {
+      /* 历史只是流水，写不进去不影响结果 */
+    }
     return summary;
   },
 );

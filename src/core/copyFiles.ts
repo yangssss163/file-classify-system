@@ -16,6 +16,7 @@ import { defaultRules, type RuleTable } from './rules';
 import { classifyWithMeta } from './classifyWithMeta';
 import { pickUniqueName, MAX_RENAME_ATTEMPTS } from './classify';
 import { planFolders, type PlanResult } from './expandAndPlan';
+import { categoryTableOf, type CategoryAssignment } from './plan';
 import { checkOutputDirection, isInsideDir, sameDir, type OutputDirectionCheck } from './outputDirection';
 import { saveRunRecord, type RunRecord, type RunRecordFailure, type RunRecordFile } from './runRecord';
 
@@ -94,6 +95,18 @@ export interface CopyOptions {
    * **预览与执行必须传同一套规则**，否则会出现「预览说去 A、执行却去了 B」。
    */
   rules?: RuleTable | null;
+  /**
+   * 显式分类（`source` 完整路径 → `category` 分类名）：这次「谁去哪个夹」已经由调用方定好
+   * （AI 分完就是这个场景），就不再按规则算；没列进来的文件仍按规则算。
+   * 只影响「本来就会按规则建分类夹」的散文件 —— 子文件夹里的文件照旧原样保留。
+   */
+  assignments?: readonly CategoryAssignment[] | null;
+  /**
+   * 这次的 `assignments` 是不是「最终定稿的方案」（用户在预览里确认过的那份）。
+   * true 时，表里有的文件**一律**按它给的分类落盘（含子文件夹里的文件，也能被手动挪到别的分类）；
+   * 默认 false = 建议性质的分类（AI 给的），只对散文件起作用、子文件夹仍原样保留。
+   */
+  assignmentsAreFinal?: boolean;
   /** 每处理完一个文件回调一次，用于界面进度 */
   onProgress?: (done: number, total: number, result: CopyFileResult) => void;
   /**
@@ -190,6 +203,8 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
   const rootsRaw = Array.from(options.roots ?? []).map((r) => String(r)).filter((r) => r.length > 0);
   const recordPath = options.recordPath ? String(options.recordPath) : null;
   const startedAt = options.startedAt ? String(options.startedAt) : new Date().toISOString();
+  /** 这次「谁去哪个夹」如果调用方已经定好（AI 分完就是这种情况），就优先按它走。 */
+  const assigned = categoryTableOf(options.assignments);
 
   /* ---------- 开工前的第一件事：校验输出方向（危险就一个字节都不写） ----------
    * 出口校验放在**写盘之前**，所以拒绝时输出目录连建都不会建（见 outputDirection.ts 的三条判据）。 */
@@ -246,7 +261,13 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
   >();
   let plan: PlanResult | null = null;
   if (rootsRaw.length > 0) {
-    plan = planFolders({ roots: rootsRaw, outputDir, rules }).plan;
+    plan = planFolders({
+      roots: rootsRaw,
+      outputDir,
+      rules,
+      assignments: options.assignments ?? null,
+      assignmentsAreFinal: options.assignmentsAreFinal === true,
+    }).plan;
     for (const f of plan.files) {
       planned.set(f.fullPath.toLowerCase(), {
         dir: f.targetDir,
@@ -276,10 +297,11 @@ export async function copyFiles(options: CopyOptions): Promise<CopySummary> {
     const originalName = path.basename(source);
     done++;
 
-    // 分类：与预览用同一个求值函数（大小/时间条件要真读属性，读不到就当作该项不命中）
+    // 分类：与预览用同一个求值函数（大小/时间条件要真读属性，读不到就当作该项不命中）。
+    // 若这次调用方已经给了「这个文件去哪个夹」（AI 分好的结论），就按它走，不再看规则。
     const pre = planned.get(source.toLowerCase());
     const matched = classifyWithMeta(rules, source, originalName);
-    const folder = pre ? pre.folder : matched.folder;
+    const folder = pre ? pre.folder : (assigned.get(source.toLowerCase()) ?? matched.folder);
 
     const base: CopyFileResult = {
       source,

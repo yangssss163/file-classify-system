@@ -1,20 +1,26 @@
 /**
- * 界面逻辑：只管拖拽 / 按钮 / 规则编辑 / 显示，分类与复制都在 core 里、由主进程调用。
- * 全程不阻塞：复制是异步的，进程里逐个回报进度。
+ * 界面逻辑：只管拖拽 / 按钮 / 方案编辑 / 显示，分类与复制都在 core 里、由主进程调用。
+ *
+ * 这一版的界面只有**一页到底**（用户要求：「页面需要切来切去，麻烦」）：
+ *   投递站（拖进来、选输出）→ 分拣台（一键选 AI 或规则）→ 预览（关系链球，手动调整）
+ *   → 确认分拣 / 取消本次分拣 → 结果（再决定要不要删源文件）
+ * 侧栏只剩四个入口：投递 / 规则 / 历史单号 / 设置。
+ *
+ * 「关系链球」的模型在 `planGraph.ts`（纯数据：拖球、连线、改名、嵌套都只改那份方案），
+ * 这里只负责画球与接线 —— 界面绝不自己算分类、也绝不自己复制文件。
  */
 import type {
-  AiSeedAssignment,
   AiSeedClassifyOutcome,
   AiSeedConfigView,
   AiSeedProgress,
-  AiSeedRuleOutcome,
   AiSeedStatus,
+  HistoryEntryView,
   ModTimeBucket,
   OrganizeProgress,
   OrganizerApi,
   OutputDirectionCheck,
-  PreviewCategoryNode,
-  PreviewOutcome,
+  PreviewFile,
+  PreviewFolder,
   PreviewSourceFolder,
   PreviewSubFolder,
   PreviewTree,
@@ -23,8 +29,26 @@ import type {
   RuleTargetView,
   ScanResult,
   SkippedPath,
+  SourceDeleteResultView,
   UndoSummary,
 } from './api-types';
+import {
+  PLAN_UNCATEGORIZED,
+  addCategory,
+  assignmentsOf,
+  buildPlanGraph,
+  categoriesOf,
+  moveFileTo,
+  nestCategory,
+  planBaseName,
+  planFullPath,
+  planSummaryText,
+  removeCategory,
+  renameCategory,
+  type PlanCategoryView,
+  type PlanFileNode,
+  type PlanGraph,
+} from './planGraph.js';
 
 declare global {
   interface Window {
@@ -37,9 +61,7 @@ const api = window.organizer;
 
 /** 兜底分类文件夹名：与 core 里那一份保持一致（core 的 rules.ts 里指向 classify.ts 的 FOLDER_OTHERS）。 */
 const FALLBACK_FOLDER = '05_其他';
-
-/** 后台求值：跟 core 里 evaluateFile / 主进程求值同一套常量，界面上不做第二份判定。 */
-const GB = 1024 * 1024 * 1024;
+void FALLBACK_FOLDER;
 
 /** 改动规则后要用的新 id：时间戳 + 递增序号，保证同一次会话里不重复。 */
 let ruleSeq = 0;
@@ -63,13 +85,7 @@ function makeNewRule(): Rule {
 
 /**
  * 新增规则：**插到规则表第一行**，也就是优先级最高、第一条命中生效的那一条。
- *
- * 为什么是第一行（用户明确选的）：规则表从上往下求值、第一条命中的生效，而列表里的行顺序
- * **就是**这个数组的顺序（只有这一套顺序，不拆成「显示顺序」和「求值顺序」两套）。
- * 新加的规则放在最前，用户刚配的这条会立刻生效、原来那套规则排在它后面；
- * 不想让它优先，用行上的「下移」把它挪下去。
- *
- * @returns 新规则在表里的下标（= 0，第一行），便于核对
+ * 新规则放在最前，用户刚配的这条会立刻生效；不想让它优先，用行上的「下移」把它挪下去。
  */
 function addRule(rules: Rule[]): number {
   rules.unshift(makeNewRule());
@@ -78,7 +94,6 @@ function addRule(rules: Rule[]): number {
 
 /**
  * 取元素：拿不到就给一个空壳（挂在它上面的监听器无效，但不会让整个界面脚本崩溃）。
- * 真正缺元素属于接线问题，由验收脚本的第 7 条（规则编辑器）盯着。
  */
 function getEl<T>(id: string): T {
   const found = id ? document.getElementById(id) : null;
@@ -92,25 +107,63 @@ function listen(target: unknown, type: string, handler: (ev: unknown) => void): 
 }
 
 const el = {
+  // 投递站
   drop: getEl<HTMLDivElement>('drop'),
   pickFiles: getEl<HTMLButtonElement>('pick-files'),
   pickFolders: getEl<HTMLButtonElement>('pick-folders'),
   clearFiles: getEl<HTMLButtonElement>('clear-files'),
   fileCount: getEl<HTMLSpanElement>('file-count'),
+  tray: getEl<HTMLDivElement>('tray'),
   skipped: getEl<HTMLDivElement>('skipped'),
   pickOut: getEl<HTMLButtonElement>('pick-out'),
   outDir: getEl<HTMLSpanElement>('out-dir'),
-  preview: getEl<HTMLButtonElement>('preview'),
-  previewWarning: getEl<HTMLParagraphElement>('preview-warning'),
-  previewSummary: getEl<HTMLParagraphElement>('preview-summary'),
-  previewTree: getEl<HTMLDivElement>('preview-tree'),
-  previewSkipped: getEl<HTMLDivElement>('preview-skipped'),
-  start: getEl<HTMLButtonElement>('start'),
-  progress: getEl<HTMLSpanElement>('progress'),
-  openOut: getEl<HTMLButtonElement>('open-out'),
   notice: getEl<HTMLParagraphElement>('notice'),
+  navCount: getEl<HTMLSpanElement>('nav-count'),
+  inboxCard: getEl<HTMLElement>('inbox-card'),
+  toggleStation: getEl<HTMLButtonElement>('toggle-station'),
+  // 分拣台
+  sortAi: getEl<HTMLButtonElement>('sort-ai'),
+  sortRules: getEl<HTMLButtonElement>('sort-rules'),
+  preview: getEl<HTMLButtonElement>('preview'),
+  planModeText: getEl<HTMLSpanElement>('plan-mode'),
+  planNotice: getEl<HTMLParagraphElement>('plan-notice'),
+  progress: getEl<HTMLSpanElement>('progress'),
+  progressBar: getEl<HTMLElement>('progress-bar'),
+  // 预览（关系链球）
+  planCard: getEl<HTMLElement>('plan-card'),
+  planWarning: getEl<HTMLDivElement>('plan-warning'),
+  planCanvas: getEl<HTMLDivElement>('plan-canvas'),
+  planSvg: getEl<SVGSVGElement>('plan-svg'),
+  planSummary: getEl<HTMLSpanElement>('plan-summary'),
+  planCats: getEl<HTMLDivElement>('plan-cats'),
+  planInspector: getEl<HTMLDivElement>('plan-inspector'),
+  planAdd: getEl<HTMLButtonElement>('plan-add'),
+  planRelayout: getEl<HTMLButtonElement>('plan-relayout'),
+  planCancel: getEl<HTMLButtonElement>('plan-cancel'),
+  planConfirm: getEl<HTMLButtonElement>('plan-confirm'),
+  planJson: getEl<HTMLElement>('plan-json'),
+  planHint: getEl<HTMLDivElement>('plan-hint'),
+  // 结果
+  resultCard: getEl<HTMLElement>('result-card'),
   list: getEl<HTMLDivElement>('file-list'),
   summary: getEl<HTMLParagraphElement>('summary'),
+  openOut: getEl<HTMLButtonElement>('open-out'),
+  openOut2: getEl<HTMLButtonElement>('open-out-2'),
+  delSrcZone: getEl<HTMLElement>('del-src-zone'),
+  delSrcCount: getEl<HTMLSpanElement>('del-src-count'),
+  delSrcWarning: getEl<HTMLDivElement>('del-src-warning'),
+  delSrcConfirm: getEl<HTMLInputElement>('del-src-confirm'),
+  delSrc: getEl<HTMLButtonElement>('del-src'),
+  delSrcReport: getEl<HTMLDivElement>('del-src-report'),
+  undo: getEl<HTMLButtonElement>('undo'),
+  undoHint: getEl<HTMLSpanElement>('undo-hint'),
+  undoWarning: getEl<HTMLParagraphElement>('undo-warning'),
+  undoReport: getEl<HTMLDivElement>('undo-report'),
+  // 历史单号
+  historyList: getEl<HTMLDivElement>('history-list'),
+  historyCount: getEl<HTMLSpanElement>('history-count'),
+  historyRefresh: getEl<HTMLButtonElement>('history-refresh'),
+  historyNotice: getEl<HTMLParagraphElement>('history-notice'),
   // 规则编辑器
   ruleCount: getEl<HTMLSpanElement>('rule-count'),
   ruleAdd: getEl<HTMLButtonElement>('rule-add'),
@@ -119,17 +172,8 @@ const el = {
   ruleLoad: getEl<HTMLButtonElement>('rule-load'),
   ruleList: getEl<HTMLDivElement>('rule-list'),
   ruleStatus: getEl<HTMLParagraphElement>('rule-status'),
-  // 撤销上一次整理（本片新增）
-  undo: getEl<HTMLButtonElement>('undo'),
-  undoHint: getEl<HTMLSpanElement>('undo-hint'),
-  undoWarning: getEl<HTMLParagraphElement>('undo-warning'),
-  undoReport: getEl<HTMLDivElement>('undo-report'),
-  // 换一种分法：AI 分类（本片接上真实现）
-  aiReclassify: getEl<HTMLButtonElement>('ai-reclassify'),
+  // AI 状态与设置
   aiStatus: getEl<HTMLSpanElement>('ai-status'),
-  aiNotice: getEl<HTMLParagraphElement>('ai-notice'),
-  aiSuggest: getEl<HTMLDivElement>('ai-suggest'),
-  // AI 设置（本片新增：接口地址 / 密钥 / 模型名 / 测试连接）
   aiEndpoint: getEl<HTMLInputElement>('ai-endpoint'),
   aiKey: getEl<HTMLInputElement>('ai-key'),
   aiModel: getEl<HTMLInputElement>('ai-model'),
@@ -139,16 +183,86 @@ const el = {
   aiConfigPath: getEl<HTMLParagraphElement>('ai-config-path'),
 };
 
-/**
- * 预览区上方那句话：一眼看出「这是预览，还没动你的文件」。
- * 只有真的看到了预览树才显示。
+/* ---------------- 路由：一页到底，侧栏只剩四个入口 ----------------
+ * 只用 hash 路由（不动主进程、不动 preload）：切页就是改 location.hash + 把对应 section 显示出来。
+ * 验收脚本的窗口桩里没有 location，所以拿不到就退回内存里记的那个 hash，逻辑照跑。
  */
-const PREVIEW_WARNING = '以下是预览，还没有复制任何文件：原文件、输出文件夹都保持原样。';
+type RouteName = 'inbox' | 'rules' | 'history' | 'settings';
+
+const ROUTES: RouteName[] = ['inbox', 'rules', 'history', 'settings'];
+
+const ROUTE_TITLES: Record<RouteName, string> = {
+  inbox: '文件分拣站',
+  rules: '分拣规则',
+  history: '历史单号',
+  settings: '设置',
+};
+
+/** 没有 location 时（验收桩）就记在这里，行为一致。 */
+let inMemoryHash = '';
+
+function readHash(): string {
+  try {
+    const loc = (window as unknown as { location?: { hash?: unknown } }).location;
+    if (loc && typeof loc.hash === 'string') return loc.hash;
+  } catch {
+    /* 桩里没有 location，走下面的内存那份 */
+  }
+  return inMemoryHash;
+}
+
+function writeHash(hash: string): void {
+  inMemoryHash = hash;
+  try {
+    const loc = (window as unknown as { location?: { hash?: string } }).location;
+    if (loc && typeof loc.hash === 'string') loc.hash = hash;
+  } catch {
+    /* 写不进去就只记在内存里 */
+  }
+}
+
+function currentRoute(): RouteName {
+  const raw = readHash().replace(/^#\/?/, '').split('?')[0];
+  return (ROUTES as string[]).indexOf(raw) >= 0 ? (raw as RouteName) : 'inbox';
+}
+
+/** 切到某一页（不触发任何业务动作，纯显示）。 */
+function go(route: RouteName): void {
+  const hash = `#/${route}`;
+  if (readHash() !== hash) writeHash(hash);
+  renderRoute(route);
+}
+
+function renderRoute(route?: RouteName): void {
+  const active = route ?? currentRoute();
+  for (const name of ROUTES) {
+    const view = document.getElementById(`view-${name}`);
+    if (view) view.hidden = name !== active;
+  }
+  const doc = document as unknown as { querySelectorAll?: (sel: string) => ArrayLike<Element> };
+  if (typeof doc.querySelectorAll === 'function') {
+    const items = doc.querySelectorAll('.nav-item');
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i] as HTMLElement;
+      if (item.getAttribute('data-route') === active) item.classList.add('active');
+      else item.classList.remove('active');
+    }
+  }
+  const main = document.getElementById('main');
+  if (main) main.scrollTop = 0;
+  if (active === 'history') void refreshHistory();
+  try {
+    document.title = `${ROUTE_TITLES[active]} · 拣分站`;
+  } catch {
+    /* 桩里的 document 是个普通对象，写不进去就算了 */
+  }
+}
+
+listen(window, 'hashchange', () => renderRoute());
 
 /**
- * 输出方向校验（本片新增的安全护栏）当前结论。
- * 危险时：预览区写出那句人话理由，「开始整理」按钮**不可点**（按钮和后台各拦一道）。
- * 下面是内存里的兜底结论（没有任何名单/输出目录时就是它），真结论由主进程算（与写盘用的是同一个函数）。
+ * 输出方向校验（安全护栏）当前结论。
+ * 危险时：预览区写出那句人话理由，「确认分拣」按钮**不可点**（按钮和后台各拦一道）。
  */
 let gateCheck: OutputDirectionCheck = {
   ok: false,
@@ -169,17 +283,33 @@ let scanResult: ScanResult | null = null;
 let skippedPaths: SkippedPath[] = [];
 let outputDir: string | null = null;
 let running = false;
-/** 「开始整理」是不是被输出方向校验挡住了（挡住就不可点）。 */
-let startBlocked = false;
+/** 方案是不是已经被确认执行过（执行过之后就不再允许重复点「确认分拣」）。 */
+let planDone = false;
+/** 投递站在出方案后自动收起（一页里能把投递、分拣、预览都看全）；用户可手动展开。 */
+let stationCollapsed = false;
+
+/** 当前这份方案（关系链球的数据源）；null = 还没生成。 */
+let planGraph: PlanGraph | null = null;
+/** 这份方案是用哪种分法算出来的（显示 + 历史单号用）。 */
+let planMode: 'ai' | 'rules' = 'rules';
+/** 方案生成时 AI 说的那句人话（规则分法时为空）。 */
+let planAiMessage = '';
+/** 当前选中的球（`file:<source>` / `cat:<scope>|<path>` / `scope:<scope>`）。 */
+let planSelected: string | null = null;
+/** 画出来的那些球（含坐标；拖动时改的就是它）。 */
+let planBalls: BallNode[] = [];
 
 function notice(msg: string): void {
   el.notice.textContent = msg;
 }
 
+function setPlanNotice(msg: string): void {
+  el.planNotice.textContent = msg;
+}
+
 /**
- * 当前要整理的文件清单 = 单选的文件 + 从源文件夹递归展开出来的文件。
- * 两者都是「文件」，都要能预览、能整理；但源文件夹那批必须带着归属一起走，
- * 所以这里只合成一份**扁平清单**（顺序稳定：先单选的，后展开的），
+ * 当前要分拣的文件清单 = 单选的文件 + 从源文件夹递归展开出来的文件。
+ * 只合成一份**扁平清单**（顺序稳定：先单选的，后展开的），
  * 真正决定落到哪里的仍然是 `selectedRoots`（后端按归属算路径）。
  */
 function collectFiles(): string[] {
@@ -194,14 +324,29 @@ function collectFiles(): string[] {
   return out;
 }
 
-/**
- * 把展开出来的文件并进主名单。
- * 为什么要并进来：预览/整理用的都是同一份扁平名单（`selectedFiles`），
- * 而「源文件夹」是**额外**的第四个参数（后端据此算每一份的归属路径）。
- * 展开完就并一次，后面「已选 N 个文件（来自 M 个文件夹）」与预览/整理都只看这一份。
- */
+/** 把展开出来的文件并进主名单（预览/整理用的都是同一份扁平名单）。 */
 function mergeScannedIntoSelected(): void {
   selectedFiles = collectFiles();
+}
+
+/** 等分拣的那一堆文件：铺成小块，一眼看出拖进来了什么（只显示前 80 个）。 */
+function renderTray(): void {
+  const files = collectFiles();
+  el.tray.textContent = '';
+  const max = 80;
+  for (const file of files.slice(0, max)) {
+    const chip = document.createElement('span');
+    chip.className = 'file-chip';
+    chip.textContent = planBaseName(file);
+    chip.setAttribute('title', file);
+    el.tray.appendChild(chip);
+  }
+  if (files.length > max) {
+    const more = document.createElement('span');
+    more.className = 'file-chip more';
+    more.textContent = `还有 ${files.length - max} 个`;
+    el.tray.appendChild(more);
+  }
 }
 
 function refreshCounts(): void {
@@ -210,7 +355,14 @@ function refreshCounts(): void {
     selectedRoots.length > 0
       ? `已选 ${total} 个文件（来自 ${selectedRoots.length} 个文件夹）`
       : `已选 ${total} 个文件`;
+  el.navCount.textContent = String(total);
   renderSkipped();
+  renderTray();
+  el.drop.classList.toggle('compact', total > 0);
+  const dzTitle = (el.drop as unknown as { querySelector?: (s: string) => Element | null }).querySelector
+    ? (el.drop as unknown as { querySelector: (s: string) => Element | null }).querySelector('.dz-title')
+    : null;
+  if (dzTitle) dzTitle.textContent = total > 0 ? '继续拖入' : '把文件或文件夹拖进来';
 }
 
 /** 被跳过的文件夹/路径：一条一行（源文件夹里读不了的子文件夹必须能看见原因）。 */
@@ -219,7 +371,7 @@ function renderSkipped(): void {
   if (skippedPaths.length === 0) return;
   const head = document.createElement('div');
   head.className = 'skipped-head';
-  head.textContent = `已跳过 ${skippedPaths.length} 处（不影响其它文件继续整理）：`;
+  head.textContent = `已跳过 ${skippedPaths.length} 处（不影响其它文件继续分拣）：`;
   el.skipped.appendChild(head);
   for (const s of skippedPaths) {
     const line = document.createElement('div');
@@ -241,7 +393,9 @@ function mergeSkipped(list: readonly SkippedPath[]): void {
 }
 
 function renderOutDir(): void {
-  el.outDir.textContent = outputDir ?? '未选择输出文件夹';
+  el.outDir.textContent = outputDir ?? '还没有选择输出位置';
+  el.outDir.className = outputDir ? 'path-box' : 'path-box empty';
+  el.outDir.setAttribute('title', outputDir ?? '');
 }
 
 function addToList(text: string, cls: string): HTMLDivElement {
@@ -275,7 +429,7 @@ function mergeFiles(incoming: string[]): { added: string[]; duplicates: number }
 
 /**
  * 收下一批路径。先问主进程「哪些是文件、哪些是文件夹」：
- *  - 文件 → 进单文件名单（照旧直接落在 输出根\分类夹\）；
+ *  - 文件 → 进单文件名单；
  *  - 文件夹 → 递归展开成文件集合，每个文件带着它的源文件夹归属（「源文件夹各归各」）。
  */
 async function acceptPaths(
@@ -305,11 +459,12 @@ async function acceptPaths(
   if (folders.length > 0) {
     const scanned = await expandRoots(folders);
     folderNote = scanned;
-    // 展开出来的文件并进主名单：预览/整理用的就是这一份（源文件夹另走第 4 个参数）
     mergeScannedIntoSelected();
   }
   refreshCounts();
-  if (added.length > 0 || folders.length > 0) invalidatePreview();
+  if (added.length > 0 || folders.length > 0) {
+    clearPlan('名单变了，上一份方案作废');
+  }
 
   const msgs: string[] = [];
   if (added.length > 0) msgs.push(`${sourceLabel}加入 ${added.length} 个文件`);
@@ -322,8 +477,7 @@ async function acceptPaths(
 
 /**
  * 把拖入/选中的文件夹递归展开（只读）并并进名单。
- * 展开由主进程做（界面拿不到 node）；拿到的每个文件都带着源文件夹归属。
- * @returns 给人看的一句说明（如「来自 2 个文件夹，共 5 个文件」）
+ * @returns 给人看的一句说明（如「加入 5 个文件（来自 2 个文件夹）」）
  */
 async function expandRoots(roots: string[]): Promise<string> {
   let result: ScanResult | null = null;
@@ -335,7 +489,6 @@ async function expandRoots(roots: string[]): Promise<string> {
   }
   if (!result || !Array.isArray(result.files)) return '';
 
-  // 源文件夹名单：合并（同一个文件夹反复拖入只算一个）
   const seenRoot = new Set(selectedRoots.map((r) => r.toLowerCase()));
   let newRoots = 0;
   for (const r of roots) {
@@ -370,199 +523,11 @@ async function expandRoots(roots: string[]): Promise<string> {
   return `加入 ${newFiles} 个文件（来自 ${newRoots > 0 ? newRoots : roots.length} 个文件夹）`;
 }
 
-/* ---------------- 预览（纯内存，绝不写盘） ---------------- */
-
-/** 文件名在预览里的显示：名字 + 后缀读不到时的原因。 */
-function fileLine(f: PreviewTree['files'][number]): HTMLDivElement {
-  const line = document.createElement('div');
-  line.className = f.error ? 'file file-error' : 'file';
-  line.textContent =
-    f.name + (f.error ? `  —— ${f.error.message}（仍会归到 ${f.folder}）` : '');
-  return line;
-}
+/* ---------------- 输出方向校验 ---------------- */
 
 /**
- * 一个「可展开的块」：一行标题（几行几列的数字）+ 一段内容。
- * 标题前面那个三角点一下就展开/收起，纯 DOM 操作，不碰磁盘。
- */
-function collapsible(
-  headText: string,
-  countText: string,
-  bodyClass: string,
-  openByDefault: boolean,
-  className: string,
-): { box: HTMLDivElement; body: HTMLDivElement; head: HTMLDivElement; text: HTMLSpanElement } {
-  const box = document.createElement('div');
-  box.className = className;
-
-  const head = document.createElement('div');
-  head.className = `${className}-head`;
-  const text = document.createElement('span');
-  text.className = 'fold-label';
-  text.textContent = `${openByDefault ? '▾' : '▸'} ${headText}　`;
-  head.appendChild(text);
-  if (countText.length > 0) {
-    const count = document.createElement('span');
-    count.className = 'folder-count';
-    count.textContent = countText;
-    head.appendChild(count);
-  }
-
-  const body = document.createElement('div');
-  body.className = bodyClass;
-  body.style.display = openByDefault ? 'block' : 'none';
-
-  const toggle = (): void => {
-    const open = body.style.display !== 'none';
-    body.style.display = open ? 'none' : 'block';
-    text.textContent = `${open ? '▸' : '▾'} ${headText}　`;
-  };
-  listen(head, 'click', toggle);
-  listen(text, 'click', toggle);
-
-  box.appendChild(head);
-  box.appendChild(body);
-  return { box, body, head, text };
-}
-
-/** 一份源文件夹下面的一个分类夹（如 01_图片）—— 预览里只有树，不写任何统计旁白。 */
-function categoryBlock(group: { folder: string; count: number; files: PreviewTree['files'] }): HTMLDivElement {
-  const { box, body } = collapsible(`${group.folder}`, '', 'files', true, 'cat');
-  for (const f of group.files) body.appendChild(fileLine(f));
-  return box;
-}
-
-/**
- * 多层分类名逐层画出来：`照片\风光` 必须画成「`照片` 这一层下面还有一层 `风光`」，
- * 而不是把带分隔符的整个名字当成一个目录名（这是本片的硬要求）。
- * 只有一层时就是普通的那一行（既有行为不变）。
- */
-function categoryTreeNode(node: PreviewCategoryNode): HTMLDivElement {
-  const { box, body } = collapsible(`${node.folder}`, '', 'files', true, 'cat');
-  for (const f of node.files) body.appendChild(fileLine(f));
-  for (const child of node.children ?? []) {
-    const childBox = categoryTreeNode(child);
-    // 下一层挂在这一层的正文里：`照片` 的框里能看到 `风光` 的框
-    childBox.className = 'cat cat-nest';
-    body.appendChild(childBox);
-  }
-  return box;
-}
-
-/**
- * 「原样保留」的那棵子树里的一个目录。
- * 预览里**只给树**：目录名 + 里面的文件名，不再写「几个文件」「沉了几层」「为什么沉进来」那些过程说明。
- */
-function subFolderBlock(sub: PreviewSubFolder, depth: number): HTMLDivElement {
-  const { box, body } = collapsible(`${sub.name}`, '', 'keep-files', depth < 2, 'keep');
-  for (const f of sub.files) body.appendChild(fileLine(f));
-  for (const child of sub.children) body.appendChild(subFolderBlock(child, depth + 1));
-  return box;
-}
-
-/**
- * 画「某个源文件夹自己那一份」下的内容（每一组 = 输出里的一个目录）：
- * 原样保留的子树 + 这一层根下散文件的分类夹。
- * 预览区**只给树**，不写「做了什么 / 怎么判定的」那类说明。
- */
-function sourceFolderBlock(sf: PreviewSourceFolder, depth: number): HTMLDivElement {
-  const label = `${sf.name}${sf.renamed ? '（同名，已改成别的输出名）' : ''}（源：${sf.sourcePath}）`;
-  const { box, body } = collapsible(label, '', 'source-files', depth === 0, 'source');
-  for (const sub of sf.subfolders) body.appendChild(subFolderBlock(sub, 0));
-  // 多级分类名逐层画（`categoryTree`）；没有它时退回按规则逐条画（一层一条，形状与现在一样）
-  const tree = sf.categoryTree;
-  if (Array.isArray(tree) && tree.length > 0) {
-    for (const node of tree) body.appendChild(categoryTreeNode(node));
-  } else {
-    for (const g of sf.categories) body.appendChild(categoryBlock(g));
-  }
-  return box;
-}
-
-/**
- * 画预览树。**预览区只给树** —— 不写「做了什么 / 怎么判定的」那类说明（用户要求）。
- *  - 拖入了文件夹（tree.tracked）：**按源文件夹分组**，每一份下面就是它在输出里的目录与文件；
- *  - 只是一堆散文件：照旧按分类列出。
- * 全程只往内存里的 DOM 写，不碰磁盘。
- */
-function renderPreviewTree(tree: PreviewTree): void {
-  el.previewTree.textContent = '';
-
-  if (tree.tracked && Array.isArray(tree.roots) && tree.roots.length > 0) {
-    for (const root of tree.roots) {
-      const { box, body } = collapsible(
-        `${root.name}${root.renamed ? '（同名，输出里已改名）' : ''}（源：${root.sourcePath}）→ 输出根下的 ${root.outputName}\\`,
-        '',
-        'root-files',
-        true,
-        'root',
-      );
-      body.appendChild(sourceFolderBlock(root.self, 0));
-      for (const child of root.children) body.appendChild(sourceFolderBlock(child, 1));
-      el.previewTree.appendChild(box);
-    }
-    return;
-  }
-
-  for (const group of tree.folders) {
-    const box = document.createElement('div');
-    box.className = group.files.length > 0 ? 'folder' : 'folder hidden';
-
-    const head = document.createElement('div');
-    head.className = 'folder-head';
-    head.textContent = `${group.files.length > 0 ? '▸' : '·'} ${group.folder}　`;
-
-    const files = document.createElement('div');
-    files.className = 'files';
-    files.style.display = 'none';
-
-    for (const f of group.files) files.appendChild(fileLine(f));
-
-    head.addEventListener('click', () => {
-      const open = files.style.display !== 'none';
-      files.style.display = open ? 'none' : 'block';
-      head.textContent = `${open ? '▸' : '▾'} ${group.folder}　`;
-      box.classList.toggle('hidden', open && group.files.length === 0);
-    });
-
-    box.appendChild(head);
-    box.appendChild(files);
-    el.previewTree.appendChild(box);
-  }
-
-  // 有文件的分类默认展开，方便一眼看清
-  for (const box of Array.from(el.previewTree.querySelectorAll('.folder'))) {
-    const head = box.querySelector('.folder-head');
-    const files = box.querySelector('.files') as HTMLDivElement | null;
-    if (!head || !files) continue;
-    const label = head.textContent ?? '';
-    if (label.startsWith('▸')) files.style.display = 'block';
-  }
-}
-
-/** 预览里也把「跳过了哪几处、为什么」写出来（不藏在暗处）。 */
-function renderPreviewSkipped(tree: PreviewTree): void {
-  el.previewSkipped.textContent = '';
-  const list = tree.skipped ?? [];
-  if (list.length === 0) return;
-  const head = document.createElement('div');
-  head.className = 'skipped-head';
-  head.textContent = `预览时跳过 ${list.length} 处（不影响其它文件）：`;
-  el.previewSkipped.appendChild(head);
-  for (const s of list) {
-    const line = document.createElement('div');
-    line.className = 'skipped-item';
-    line.textContent = `${s.fullPath} —— ${s.reason}`;
-    el.previewSkipped.appendChild(line);
-  }
-}
-
-/**
- * 输出方向校验：拿「这一批源文件夹 / 散文件 + 输出目录」去后台算一遍（只读，一个字节都不写）。
- * 危险时把理由写进预览区，并让「开始整理」不可点 —— 这道关卡与主进程真正写盘前的那一道是**同一个函数**，
- * 所以「界面说能开工、后台却拒绝」不可能发生。
- * `files` / `roots` 由调用方显式给（免得校验用到的清单和真正要整理的那一份不是同一份）。
- * @param label 校验完成后要说的一句人话（不传就不多说）
+ * 拿「这一批源文件夹 / 散文件 + 输出目录」去后台算一遍（只读，一个字节都不写）。
+ * 危险时把理由写进预览区，并让「确认分拣」不可点 —— 这道关卡与主进程真正写盘前的那一道是**同一个函数**。
  */
 async function runDirectionCheck(
   files: readonly string[],
@@ -571,11 +536,7 @@ async function runDirectionCheck(
 ): Promise<OutputDirectionCheck | null> {
   let check: OutputDirectionCheck | null = null;
   try {
-    check = await api.checkOutputDirection({
-      roots: roots.slice(),
-      files: files.slice(),
-      outputDir,
-    });
+    check = await api.checkOutputDirection({ roots: roots.slice(), files: files.slice(), outputDir });
   } catch {
     check = null; // 校验本身出错（拿不到结论）不阻塞：主进程写盘前还会再拦一道
   }
@@ -592,104 +553,1491 @@ async function runDirectionCheck(
   return check;
 }
 
-/** 把方向结论画出来：危险就写出那句话（一字不改地照抄后台给的说明）。 */
+/**
+ * 把方向结论画出来：危险就写出那句话（一字不改地照抄后台给的说明）。
+ * 不依赖「方案已经画出来」——方向危险时预览根本不会出现，但这句话必须看得见。
+ */
 function renderDirectionWarning(): void {
   const blocked = gateCheck.ok !== true;
-  if (blocked) {
-    const why =
-      gateCheck.message && gateCheck.message.trim().length > 0
-        ? gateCheck.message
-        : '输出方向不对，这次不许开工（一个字节都不会写）。';
-    el.previewWarning.textContent = `不能开工：${why}`;
-  } else if (el.previewTree.children && el.previewTree.children.length > 0) {
-    el.previewWarning.textContent = PREVIEW_WARNING;
-  }
-  // 危险时「开始整理」不可点（真点了也会被后台拦下）
-  startBlocked = blocked;
-  updateStartButton();
+  const hasWork = collectFiles().length > 0 && !!outputDir;
+  el.planWarning.textContent =
+    blocked && hasWork
+      ? `不能开工：${gateCheck.message && gateCheck.message.trim().length > 0 ? gateCheck.message : '输出方向不对，这次不许开工（一个字节都不会写）。'}`
+      : '';
+  updateConfirmButton();
 }
 
-/** 「开始整理」按钮的可点状态：正在跑、或方向危险 → 不可点。 */
-function updateStartButton(): void {
-  el.start.disabled = running || startBlocked;
+/** 「确认分拣」按钮的可点状态：正在跑、方向危险、方案已执行过 → 不可点。 */
+function updateConfirmButton(): void {
+  const blocked = gateCheck.ok !== true;
+  el.planConfirm.disabled = running || blocked || planDone || planGraph === null;
+  el.planConfirm.textContent = planDone ? '已分拣' : '确认分拣';
+  el.planCancel.disabled = running;
+  el.planAdd.disabled = running || planGraph === null;
+  el.sortAi.disabled = running;
+  el.sortRules.disabled = running;
 }
 
-/** 名单 / 源文件夹 / 输出目录一变，就把方向校验重算一遍（免得留下过时的结论）。 */
+/** 名单 / 源文件夹 / 输出目录一变，就把方向校验重算一遍。 */
 function refreshDirectionNow(label = ''): void {
   void runDirectionCheck(collectFiles(), selectedRoots.slice(), label);
 }
 
+/* ---------------- 方案：从预览树 + AI 结论造出关系链球 ---------------- */
+
 /**
- * 清掉上一次预览，避免「旧预览」被误当成当前名单的结果。
- * 预览区**只放树**：这里只清树与「跳过」那两块，方向警告交给 `renderDirectionWarning()` 重画。
+ * 从预览树里读出每个文件「不手动改的话会落在哪」：
+ *  - `scope`：它在输出里的源文件夹前缀（散文件模式为空）；
+ *  - `category`：相对 scope 的分类路径。
+ * 树是 core 算的（与真正落盘同一套规则），界面只做搬运，不重算分类。
  */
-function clearPreview(): void {
-  el.previewSummary.textContent = '';
-  el.previewTree.textContent = '';
-  el.previewSkipped.textContent = '';
+/** 预览树里那个文件的**原文件路径**（后台算好的数据；拖进来的 File 对象另走 api.pathForFile）。 */
+function sourcePathOf(file: PreviewFile): string {
+  return String(file.fullPath ?? '');
+}
+
+function readPlanBase(tree: PreviewTree): PlanFileNode[] {
+  const files: PlanFileNode[] = [];
+  const seen = new Set<string>();
+  const push = (source: string, scope: string, category: string, name?: string): void => {
+    const key = String(source ?? '').toLowerCase();
+    if (key.length === 0 || seen.has(key)) return;
+    seen.add(key);
+    files.push({ source, name: name || planBaseName(source), scope, category });
+  };
+
+  const walkFolder = (folder: PreviewFolder, scope: string, prefix: string): void => {
+    const catPath = prefix ? `${prefix}\\${folder.folder}` : folder.folder;
+    for (const f of folder.files ?? []) push(sourcePathOf(f), scope, catPath, f.name);
+    for (const child of folder.children ?? []) walkFolder(child, scope, catPath);
+  };
+  const walkSub = (sub: PreviewSubFolder, scope: string, prefix: string): void => {
+    const catPath = prefix ? `${prefix}\\${sub.name}` : sub.name;
+    for (const f of sub.files ?? []) push(sourcePathOf(f), scope, catPath, f.name);
+    for (const child of sub.children ?? []) walkSub(child, scope, catPath);
+  };
+
+  if (tree.tracked === true && Array.isArray(tree.roots) && tree.roots.length > 0) {
+    for (const root of tree.roots) {
+      const sfs: PreviewSourceFolder[] = [root.self, ...root.children];
+      for (const sf of sfs) {
+        const scope = [root.outputName, ...(sf.chain ?? [])].filter((s) => String(s).length > 0).join('\\');
+        for (const c of sf.categories ?? []) walkFolder(c, scope, '');
+        for (const s of sf.subfolders ?? []) walkSub(s, scope, '');
+      }
+    }
+  } else {
+    for (const f of tree.folders ?? []) walkFolder(f, '', '');
+  }
+
+  // 兜底：树没覆盖到的（读不到元信息的）按它自己的 folder 放
+  for (const f of tree.files ?? []) push(sourcePathOf(f), '', f.folder, f.name);
+  return files;
+}
+
+/** 投递站：出方案后收起来，点按钮能再展开（只改显示）。 */
+function syncStation(): void {
+  const compact = stationCollapsed && planGraph !== null;
+  if (el.inboxCard) el.inboxCard.classList.toggle('is-compact', compact);
+  el.toggleStation.hidden = planGraph === null;
+  el.toggleStation.textContent = compact ? '展开投递站' : '收起投递站';
+}
+
+/** 清掉当前这份方案（名单/输出/分法一变就作废；**不删任何文件**）。 */
+function clearPlan(reason = ''): void {
+  const had = planGraph !== null;
+  planGraph = null;
+  stationCollapsed = false;
+  syncStation();
+  planSelected = null;
+  planBalls = [];
+  planDone = false;
+  planAiMessage = '';
+  if (el.planCard) el.planCard.hidden = true;
+  if (el.planJson) el.planJson.textContent = '';
+  if (el.planSummary) el.planSummary.textContent = '';
+  if (el.planCats) el.planCats.textContent = '';
+  if (el.planInspector) el.planInspector.textContent = '';
+  if (el.planWarning) el.planWarning.textContent = '';
+  if (el.planSvg && el.planSvg.textContent !== undefined) el.planSvg.textContent = '';
+  // 降级清单要摘掉，但 <svg> 本身必须留在页面上（摘掉之后球就画在野节点上了）
+  const fallback = el.planCanvas && el.planCanvas.querySelector ? el.planCanvas.querySelector('.plan-list') : null;
+  if (fallback && fallback.parentNode) fallback.parentNode.removeChild(fallback);
+  updateConfirmButton();
+  if (reason && had) setPlanNotice(reason);
+  else if (!reason && had) setPlanNotice('');
+}
+
+/** 上一份方案作废（改名单/改输出时调用）。 */
+function invalidatePreview(): void {
+  clearPlan();
+}
+
+/**
+ * 生成方案：先按规则预览一遍（拿到不手动改的落点），AI 模式下再让 AI 覆盖一遍分类。
+ * 两条路都是**只读**：不创建目录、不复制文件。
+ */
+async function buildPlan(mode: 'ai' | 'rules'): Promise<void> {
+  if (running) return;
+  const files = collectFiles();
+  if (files.length === 0) {
+    setPlanNotice('先把文件或文件夹投进来（左边投递站）');
+    notice('还没有可分拣的文件');
+    return;
+  }
+  if (!outputDir) {
+    setPlanNotice('还没选输出位置：点「输出位置」选一个文件夹');
+    notice('还没选输出位置');
+    return;
+  }
+
+  clearPlan();
+  planDone = false;
+  planMode = mode;
+  setPlanNotice(mode === 'ai' ? '正在让 AI 看这些文件…（只发文件名、大小、修改时间）' : '正在按规则算落点…');
+  el.progress.textContent = `已处理 0 / 共 ${files.length}`;
+  if (el.progressBar) el.progressBar.style.width = '0%';
+
+  // 方向上危险 → 先说清，不生成方案（一个字节都没写）
+  const gate = await runDirectionCheck(files, selectedRoots.slice(), '');
+  if (gate && gate.ok !== true) {
+    const why = gate.message && gate.message.trim().length > 0 ? gate.message : '输出方向不对';
+    setPlanNotice(`不能开工：${why}。换一个跟源文件夹无关的输出目录。`);
+    renderDirectionWarning();
+    return;
+  }
+
+  let outcome: { ok: boolean; tree?: PreviewTree; message?: string } | null = null;
+  try {
+    // 源文件夹走「放下来、用一次」的那个入口：预览与真正落盘用的是同一批归属。
+    if (typeof api.setSourceRoots === 'function') await api.setSourceRoots(selectedRoots.slice());
+    outcome = (await api.preview(files, outputDir, rulesForUse())) as unknown as {
+      ok: boolean;
+      tree?: PreviewTree;
+      message?: string;
+    };
+  } catch (err) {
+    setPlanNotice(`预览没做出来：${(err as Error)?.message ?? '未知错误'}`);
+    return;
+  } finally {
+    try {
+      if (typeof api.setSourceRoots === 'function') await api.setSourceRoots([]);
+    } catch {
+      /* 清不掉也不影响本次结果 */
+    }
+  }
+
+  if (!outcome || outcome.ok !== true || !outcome.tree) {
+    setPlanNotice(outcome && outcome.message ? outcome.message : '预览没做出来');
+    return;
+  }
+
+  const tree = outcome.tree;
+  if (tree.outputDirection) gateCheck = tree.outputDirection;
+  const base = readPlanBase(tree);
+
+  if (mode === 'ai') {
+    let ai: AiSeedClassifyOutcome | null = null;
+    try {
+      // 第三个参数是源文件夹：核心据它读出「原文件夹已有的分类」当候选，AI 在**已有结构**上分。
+      ai = await api.aiClassify(files, outputDir, selectedRoots.slice());
+    } catch (err) {
+      setPlanNotice(`AI 分拣没能调起来：${(err as Error)?.message ?? '未知错误'}（可以先用「规则分拣」）`);
+      return;
+    }
+    if (!ai || ai.ok !== true) {
+      const msg = ai && typeof ai.message === 'string' && ai.message.length > 0 ? ai.message : 'AI 分拣没有结果';
+      setPlanNotice(`${msg}——这次没有用 AI，也没有复制或删除任何文件；可以点「规则分拣」。`);
+      await refreshAiStatus();
+      return;
+    }
+    const table = new Map<string, string>();
+    for (const a of ai.assignments ?? []) table.set(String(a.source).toLowerCase(), a.category);
+    let overridden = 0;
+    for (const f of base) {
+      const hit = table.get(f.source.toLowerCase());
+      if (hit && hit.length > 0) {
+        f.category = hit;
+        overridden++;
+      }
+    }
+    planAiMessage = ai.message;
+    setPlanNotice(`${ai.message}（可以直接改；确认之前不会动任何文件）`);
+    if (overridden === 0) setPlanNotice(`${ai.message}——这一批文件都没有拿到新分类，按规则兜底`);
+  } else {
+    planAiMessage = '';
+    // 这句话（「预览用的是当前规则（共 N 条…）」）由核心那句原话给，界面不另写一份
+    setPlanNotice(
+      `${rulesSummaryText()}。${base.length} 个文件；下面可以按需手动调整，确认之前不会动任何文件。`,
+    );
+  }
+
+  planGraph = buildPlanGraph(base);
+  planSelected = null;
+  planDone = false;
+  renderPlan();
+  renderDirectionWarning();
+  el.progress.textContent = `已出方案：共 ${files.length} 个文件（还没开始复制）`;
+  if (el.progressBar) el.progressBar.style.width = '0%';
+  if (el.planCard) el.planCard.hidden = false;
+  scrollTo(el.planCard);
+}
+
+/** 把某块内容滚到视野里（元素不存在就算了）。 */
+function scrollTo(target: unknown): void {
+  const node = target as { scrollIntoView?: (opts: unknown) => void } | null;
+  if (node && typeof node.scrollIntoView === 'function') {
+    try {
+      node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch {
+      /* 某些环境不支持，无所谓 */
+    }
+  }
+}
+
+/* ---------------- 关系链球：画 + 拖 + 连线 ---------------- */
+
+type BallKind = 'root' | 'scope' | 'category' | 'file';
+
+interface BallNode {
+  /** `root` / `scope:<scope>` / `cat:<scope>|<path>` / `file:<source>` */
+  id: string;
+  kind: BallKind;
+  label: string;
+  scope: string;
+  /** 分类路径（category 才有） */
+  catPath: string;
+  /** 文件完整路径（file 才有） */
+  source: string;
+  x: number;
+  y: number;
+  r: number;
+  /** 挂在哪颗球上 */
+  parent: string | null;
+  /** 布局给的连线通道：非首行子球的连线从竖直通道下来，不穿过上面的球（重排时算，其余时候没有） */
+  _entryX?: number;
+  _busY?: number;
+}
+
+function catId(scope: string, path: string): string {
+  return `cat:${scope}|${path}`;
+}
+
+function fileId(source: string): string {
+  return `file:${source}`;
+}
+
+function scopeId(scope: string): string {
+  return `scope:${scope}`;
+}
+
+/** 由方案造出所有球（root → 源文件夹 → 分类 → 文件）。 */
+function buildBalls(graph: PlanGraph): BallNode[] {
+  const cats = categoriesOf(graph);
+  const balls: BallNode[] = [];
+  const rootLabel = outputDir ? planBaseName(outputDir) || '输出' : '输出';
+  balls.push({
+    id: 'root',
+    kind: 'root',
+    label: rootLabel,
+    scope: '',
+    catPath: '',
+    source: '',
+    x: 0,
+    y: 0,
+    r: 26,
+    parent: null,
+  });
+
+  const scopes = Array.from(new Set(cats.map((c) => c.scope))).sort();
+  for (const scope of scopes) {
+    if (scope.length === 0) continue;
+    balls.push({
+      id: scopeId(scope),
+      kind: 'scope',
+      label: planBaseName(scope) || scope,
+      scope,
+      catPath: '',
+      source: '',
+      x: 0,
+      y: 0,
+      r: 20,
+      parent: 'root',
+    });
+  }
+
+  for (const c of cats) {
+    const parts = c.catPath.split('\\');
+    const parentPath = parts.slice(0, -1).join('\\');
+    const parent = parentPath
+      ? catId(c.scope, parentPath)
+      : c.scope
+        ? scopeId(c.scope)
+        : 'root';
+    balls.push({
+      id: catId(c.scope, c.catPath),
+      kind: 'category',
+      label: c.name,
+      scope: c.scope,
+      catPath: c.catPath,
+      source: '',
+      x: 0,
+      y: 0,
+      r: 14 + Math.min(9, Math.sqrt(Math.max(1, c.total)) * 2.2),
+      parent,
+    });
+  }
+
+  for (const f of graph.files ?? []) {
+    balls.push({
+      id: fileId(f.source),
+      kind: 'file',
+      label: String(f.name ?? planBaseName(f.source)),
+      scope: String(f.scope ?? ''),
+      catPath: String(f.category ?? ''),
+      source: f.source,
+      x: 0,
+      y: 0,
+      r: 7,
+      parent: catId(String(f.scope ?? ''), String(f.category ?? '')),
+    });
+  }
+  return balls;
+}
+
+/**
+ * 摆位置：竖向 tidy tree —— 父球在上、子球按行排在正下方（一行放不下就换行），
+ * 每棵子树独占一条横向区间、父球对齐到子树正中。
+ * 这样初始预览整棵树左右居中，连线只在父子之间的空档里走，不会压到别的球、也不会互相交叉。
+ */
+const LAYOUT = {
+  colGap: 26, // 同一行两颗球之间
+  rowGap: 22, // 行与行之间
+  childGap: 52, // 父球与它第一行子球之间
+  maxRowW: 660, // 一行最宽多少，超了就换行（换行后的连线走专用通道，不穿球）
+  top: 56, // 顶上留白
+  pad: 48, // 左右留白
+};
+
+/** 球（含它下面那行文字）占的横向宽度。估算就够，只用于摆位。 */
+function ballBoxW(b: BallNode): number {
+  return Math.max(b.r * 2 + 6, Math.min(b.label.length, 16) * 12 + 10);
+}
+
+/** 球自身占的高度：根球文字在球里，其余在球下面（分类/源文件夹还带一行计数）。 */
+function ballOwnH(b: BallNode): number {
+  if (b.kind === 'root') return b.r * 2;
+  return b.r + 18 + (b.kind === 'file' ? 0 : 16);
+}
+
+interface LayoutRow {
+  items: { k: BallNode; w: number }[];
+  w: number;
+  h: number;
+}
+
+/** 量出每颗球子树的宽高，顺手把子球按行分好组（记在 `_rows` 上，摆位时用）。 */
+function measureBall(node: BallNode, children: Map<string, BallNode[]>): { w: number; h: number } {
+  const kids = children.get(node.id) ?? [];
+  const ownW = ballBoxW(node);
+  const ownH = ballOwnH(node);
+  if (kids.length === 0) return { w: ownW, h: ownH };
+
+  const sized = kids.map((k) => ({ k, box: measureBall(k, children) }));
+  const rows: LayoutRow[] = [];
+  let cur: { k: BallNode; w: number; h: number }[] = [];
+  let curW = 0;
+  const flush = () => {
+    if (cur.length === 0) return;
+    rows.push({
+      items: cur.map((c) => ({ k: c.k, w: c.w })),
+      w: curW,
+      h: Math.max(...cur.map((c) => c.h)),
+    });
+    cur = [];
+    curW = 0;
+  };
+  for (const s of sized) {
+    const add = (cur.length > 0 ? LAYOUT.colGap : 0) + s.box.w;
+    if (cur.length === 0 || curW + add <= LAYOUT.maxRowW) {
+      cur.push({ k: s.k, w: s.box.w, h: s.box.h });
+      curW += add;
+    } else {
+      flush();
+      cur.push({ k: s.k, w: s.box.w, h: s.box.h });
+      curW = s.box.w;
+    }
+  }
+  flush();
+
+  const rowsH = rows.reduce((acc, r) => acc + r.h, 0) + LAYOUT.rowGap * Math.max(0, rows.length - 1);
+  (node as BallNode & { _rows?: LayoutRow[] })._rows = rows;
+  return { w: Math.max(ownW, ...rows.map((r) => r.w)), h: ownH + LAYOUT.childGap + rowsH };
+}
+
+/** 把量好的子树摆到（left, top）起、宽 spanW 的区间里：球对齐区间正中。 */
+function placeBall(node: BallNode, top: number, left: number, spanW: number): void {
+  const ownH = ballOwnH(node);
+  node.x = left + spanW / 2;
+  node.y = top + ownH / 2;
+  const rows = (node as BallNode & { _rows?: LayoutRow[] })._rows;
+  if (!rows || rows.length === 0) return;
+  let rowY = top + ownH + LAYOUT.childGap;
+  // 已经摆好的上面几行占的横向区间：给下面行的连线挑「不穿过任何球」的竖直通道用
+  let spansAbove: { l: number; r: number }[] = [];
+  for (const row of rows) {
+    let rowLeft = left + (spanW - row.w) / 2;
+    const spans: { k: BallNode; l: number; r: number }[] = [];
+    for (const item of row.items) {
+      spans.push({ k: item.k, l: rowLeft, r: rowLeft + item.w });
+      rowLeft += item.w + LAYOUT.colGap;
+    }
+    if (spansAbove.length > 0) {
+      // 非首行：每颗子球的连线走一条竖直通道（落在上面所有球都占不到的空档里）
+      const busY = rowY - LAYOUT.rowGap / 2;
+      const gaps = freeGapCenters(spansAbove);
+      for (const s of spans) {
+        const target = (s.l + s.r) / 2;
+        let best = gaps[0] ?? target;
+        for (const g of gaps) {
+          if (Math.abs(g - target) < Math.abs(best - target)) best = g;
+        }
+        s.k._entryX = best;
+        s.k._busY = busY;
+      }
+    }
+    for (const s of spans) {
+      placeBall(s.k, rowY, s.l, s.r - s.l);
+    }
+    spansAbove = spansAbove.concat(spans.map((s) => ({ l: s.l, r: s.r })));
+    rowY += row.h + LAYOUT.rowGap;
+  }
+}
+
+/** 一堆横向区间合并且排序后，中间的空档中心 + 两端外侧的备选点。 */
+function freeGapCenters(spans: { l: number; r: number }[]): number[] {
+  const sorted = spans.slice().sort((a, b) => a.l - b.l);
+  const merged: { l: number; r: number }[] = [];
+  for (const s of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && s.l <= last.r + 1) last.r = Math.max(last.r, s.r);
+    else merged.push({ l: s.l, r: s.r });
+  }
+  const out: number[] = [];
+  for (let i = 0; i < merged.length - 1; i++) {
+    const gapL = merged[i].r;
+    const gapR = merged[i + 1].l;
+    if (gapR - gapL >= 10) out.push((gapL + gapR) / 2);
+  }
+  const minL = merged.length > 0 ? merged[0].l : 0;
+  const maxR = merged.length > 0 ? merged[merged.length - 1].r : 0;
+  out.push(minL - 34, maxR + 34);
+  return out;
+}
+
+function layoutBalls(balls: BallNode[]): void {
+  const children = new Map<string, BallNode[]>();
+  for (const b of balls) {
+    const key = b.parent ?? '';
+    if (!children.has(key)) children.set(key, []);
+    children.get(key)?.push(b);
+  }
+  const root = balls.find((b) => b.kind === 'root');
+  if (!root) return;
+  const box = measureBall(root, children);
+  placeBall(root, LAYOUT.top, 0, box.w);
+  // 整树往右挪一挪：左边留出 pad，别让球贴到画布边上
+  let minX = Infinity;
+  for (const b of balls) minX = Math.min(minX, b.x - ballBoxW(b) / 2);
+  if (Number.isFinite(minX)) {
+    const dx = LAYOUT.pad - minX;
+    for (const b of balls) b.x += dx;
+  }
+}
+
+/** 桩环境（没有 SVG）时的降级：按关系一行一条列出来，功能照旧。 */
+function renderPlanFallback(cats: readonly PlanCategoryView[]): void {
+  const box = el.planCanvas;
+  box.textContent = '';
+  const list = document.createElement('div');
+  list.className = 'plan-list';
+  for (const c of cats) {
+    const row = document.createElement('div');
+    row.className = `ball-row is-category${planSelected === catId(c.scope, c.catPath) ? ' is-selected' : ''}`;
+    row.textContent = `${'  '.repeat(Math.max(0, c.depth - 1))}${c.full}（${c.total}）`;
+    list.appendChild(row);
+    for (const f of planGraph?.files ?? []) {
+      const scope = String(f.scope ?? '');
+      const path = String(f.category ?? '');
+      if (scope !== c.scope || path !== c.catPath) continue;
+      const line = document.createElement('div');
+      line.className = `ball-row${planSelected === fileId(f.source) ? ' is-selected' : ''}`;
+      line.textContent = `${'  '.repeat(Math.max(0, c.depth))}· ${String(f.name ?? planBaseName(f.source))}`;
+      list.appendChild(line);
+    }
+  }
+  box.appendChild(list);
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/** 折线转圆角路径：每个拐点用二次贝塞尔倒角（点距太近的点直接丢弃）。 */
+function roundedPath(pts: { x: number; y: number }[], r: number): string {
+  const p: { x: number; y: number }[] = [];
+  for (const pt of pts) {
+    const last = p[p.length - 1];
+    if (!last || Math.hypot(pt.x - last.x, pt.y - last.y) > 0.5) p.push(pt);
+  }
+  if (p.length < 2) return '';
+  let d = `M ${p[0].x} ${p[0].y}`;
+  for (let i = 1; i < p.length - 1; i++) {
+    const prev = p[i - 1];
+    const cur = p[i];
+    const next = p[i + 1];
+    const d1 = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+    const d2 = Math.hypot(next.x - cur.x, next.y - cur.y);
+    const rr = Math.min(r, d1 / 2, d2 / 2);
+    const a = { x: cur.x + ((prev.x - cur.x) / d1) * rr, y: cur.y + ((prev.y - cur.y) / d1) * rr };
+    const c = { x: cur.x + ((next.x - cur.x) / d2) * rr, y: cur.y + ((next.y - cur.y) / d2) * rr };
+    d += ` L ${a.x} ${a.y} Q ${cur.x} ${cur.y} ${c.x} ${c.y}`;
+  }
+  const last = p[p.length - 1];
+  return `${d} L ${last.x} ${last.y}`;
+}
+
+function svgNode<K extends keyof SVGElementTagNameMap>(name: K): SVGElementTagNameMap[K] {
+  return document.createElementNS(SVG_NS, name) as SVGElementTagNameMap[K];
+}
+
+/** 拖动中的那颗球（pointerdown 之后才非空）。 */
+let dragState: {
+  node: BallNode;
+  el: unknown;
+  downX: number;
+  downY: number;
+  lastX: number;
+  lastY: number;
+  moved: boolean;
+} | null = null;
+
+/**
+ * 拖一下 / 点一下之后，浏览器还会补一个 `click`。点选已经在这里处理过了，
+ * 那个迟到的 click 会再触发一次「选中 + 重排」，把刚拖到的位置弹回去 ——
+ * 用这个旗子把它吞掉（下一拍就复位，不影响下一次真正的点选）。
+ */
+let suppressNextClick = false;
+
+/** SVG 上的事件只挂一次。 */
+let svgWired = false;
+
+function wireSvg(): void {
+  if (svgWired) return;
+  const svg = el.planSvg as unknown as SVGSVGElement | null;
+  if (!svg || typeof svg.addEventListener !== 'function') return;
+  svgWired = true;
+
+  svg.addEventListener('pointermove', (ev: Event) => {
+    const st = dragState;
+    if (!st) return;
+    const p = pointerPoint(ev as PointerEvent);
+    if (!p) return;
+    // 累加式位移：每拍把「这一拍动了多少」加到球上（比绝对偏移更顺、不飘）
+    const dx = p.x - st.lastX;
+    const dy = p.y - st.lastY;
+    st.lastX = p.x;
+    st.lastY = p.y;
+    if (!st.moved && Math.abs(p.x - st.downX) + Math.abs(p.y - st.downY) > 3) st.moved = true;
+    st.node.x += dx;
+    st.node.y += dy;
+    // 拖动中只挪那颗球自己的 transform，**不整屏重画**：
+    // 整屏重画会把球整颗换掉，拖起来一顿一顿，还会让这次拖动看起来像被「取消」了。
+    const elNode = st.el as { setAttribute?: (name: string, value: string) => void } | null;
+    if (elNode && typeof elNode.setAttribute === 'function') {
+      elNode.setAttribute('transform', `translate(${Math.round(st.node.x)} ${Math.round(st.node.y)})`);
+    }
+  });
+
+  svg.addEventListener('pointerup', (ev: Event) => {
+    const st = dragState;
+    dragState = null;
+    if (!st) return;
+    // 这次指针交互已经在这里收尾了，别再让迟到的 click 弹一次位置
+    suppressNextClick = true;
+    setTimeout(() => {
+      suppressNextClick = false;
+    }, 0);
+    const p = pointerPoint(ev as PointerEvent);
+    const target = p ? ballAt(p.x, p.y, st.node.id) : null;
+    // 落在别的球上（哪怕只挪了一点点）就是「连过去」——别因为没到 3px 就把一次拖拽当成点选
+    if (target && target.id !== st.node.id) {
+      linkBalls(st.node, target);
+      return;
+    }
+    if (!st.moved) {
+      planSelected = st.node.id;
+      renderPlan(false);
+      return;
+    }
+    // 自由摆位：没连到别的球，就保留这次拖到的位置（不弹回）
+    drawBalls();
+  });
+}
+
+/** 指针位置换算成画布坐标（拿不到就返回 null，绝不抛）。 */
+function pointerPoint(ev: PointerEvent): { x: number; y: number } | null {
+  const svg = el.planSvg as unknown as SVGSVGElement | null;
+  const canvas = el.planCanvas;
+  if (!svg || typeof (svg as unknown as { getBoundingClientRect?: unknown }).getBoundingClientRect !== 'function') {
+    return null;
+  }
+  // 优先按 SVG 自己的变换矩阵换算：画布被 CSS 拉伸过，直接减矩形会差一个比例
+  try {
+    const holder = svg as unknown as {
+      createSVGPoint?: () => { x: number; y: number; matrixTransform: (m: unknown) => { x: number; y: number } };
+      getScreenCTM?: () => { inverse: () => unknown } | null;
+    };
+    if (typeof holder.createSVGPoint === 'function' && typeof holder.getScreenCTM === 'function') {
+      const ctm = holder.getScreenCTM();
+      if (ctm) {
+        const pt = holder.createSVGPoint();
+        pt.x = Number(ev.clientX ?? 0);
+        pt.y = Number(ev.clientY ?? 0);
+        const out = pt.matrixTransform(ctm.inverse());
+        if (Number.isFinite(out.x) && Number.isFinite(out.y)) return { x: out.x, y: out.y };
+      }
+    }
+  } catch {
+    /* 没有矩阵 API 就退回下面的算法 */
+  }
+  try {
+    const rect = (svg as unknown as { getBoundingClientRect: () => DOMRect }).getBoundingClientRect();
+    return {
+      x: Number(ev.clientX ?? 0) - rect.left + Number(canvas.scrollLeft ?? 0),
+      y: Number(ev.clientY ?? 0) - rect.top + Number(canvas.scrollTop ?? 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 这个位置上有哪颗球（排除自己）。 */
+function ballAt(x: number, y: number, exceptId: string): BallNode | null {
+  let best: BallNode | null = null;
+  let bestDist = Infinity;
+  for (const b of planBalls) {
+    if (b.id === exceptId) continue;
+    const d = Math.hypot(b.x - x, b.y - y);
+    if (d <= b.r + 16 && d < bestDist) {
+      best = b;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
+/**
+ * 把一颗球连到另一颗上（关系链球的核心手势）：
+ *  - 文件 → 分类：换组（必须同一个源文件夹）；
+ *  - 分类 → 分类：变成子分类；分类 → 根球：拽回顶层。
+ * 不合法就**只给一句人话**，方案一个字都不改。
+ */
+function linkBalls(from: BallNode, to: BallNode): void {
+  if (!planGraph) return;
+
+  if (from.kind === 'file') {
+    if (to.kind !== 'category') {
+      setPlanNotice('文件要放到某个分类球上（不能直接挂在输出根上）');
+      drawBalls();
+      return;
+    }
+    if (from.scope !== to.scope) {
+      setPlanNotice('不同源文件夹之间不能互相搬（各自的目录各归各）；可以先给这个文件建一个分类');
+      drawBalls();
+      return;
+    }
+    planGraph = moveFileTo(planGraph, from.source, to.scope, to.catPath);
+    planSelected = catId(to.scope, to.catPath);
+    setPlanNotice(`已把「${from.label}」放进「${planFullPath(to.scope, to.catPath)}」`);
+    renderPlan(false);
+    return;
+  }
+
+  if (from.kind === 'category') {
+    if (to.kind === 'category' && to.scope !== from.scope) {
+      setPlanNotice('不同源文件夹的分类不能互相嵌套（各自的目录各归各）');
+      drawBalls();
+      return;
+    }
+    if (to.kind === 'file') {
+      setPlanNotice('分类要拖到分类球上（文件不能当父级）');
+      drawBalls();
+      return;
+    }
+    const parentPath = to.kind === 'category' ? to.catPath : '';
+    const scope = from.scope;
+    planGraph = nestCategory(planGraph, scope, from.catPath, parentPath);
+    planSelected = catId(scope, parentPath ? `${parentPath}\\${from.label}` : from.label);
+    setPlanNotice(
+      parentPath
+        ? `已把「${from.label}」变成「${planFullPath(scope, parentPath)}」的子分类`
+        : `已把「${from.label}」挪回顶层`,
+    );
+    renderPlan(false);
+    return;
+  }
+
+  setPlanNotice('这颗球不能连');
+  drawBalls();
+}
+
+/** 画球与连线（每次都按 planBalls 重画：球不多，简单可靠）。 */
+function drawBalls(): void {
+  const svg = el.planSvg as unknown as SVGSVGElement | null;
+  if (!svg || typeof (document as unknown as { createElementNS?: unknown }).createElementNS !== 'function') {
+    return;
+  }
+  svg.textContent = '';
+
+  const byId = new Map(planBalls.map((b) => [b.id, b] as const));
+  let minX = Infinity;
+  let maxX = 0;
+  let maxY = 0;
+  for (const b of planBalls) {
+    minX = Math.min(minX, b.x - Math.max(b.r, ballBoxW(b) / 2) - 8, b._entryX ?? b.x);
+    maxX = Math.max(maxX, b.x + Math.max(b.r, ballBoxW(b) / 2) + 8, b._entryX ?? b.x);
+    maxY = Math.max(maxY, b.y + b.r + 46);
+  }
+  if (!Number.isFinite(minX)) minX = 0;
+  const vbX = Math.floor(Math.min(minX, 0));
+  const vbW = Math.ceil(Math.max(maxX - vbX, 320));
+  const vbH = Math.ceil(Math.max(maxY, 320));
+  svg.setAttribute('viewBox', `${vbX} 0 ${vbW} ${vbH}`);
+  svg.setAttribute('width', String(vbW));
+  svg.setAttribute('height', String(vbH));
+
+  const links = svgNode('g');
+  links.setAttribute('class', 'links');
+  svg.appendChild(links);
+  for (const b of planBalls) {
+    if (!b.parent) continue;
+    const p = byId.get(b.parent);
+    if (!p) continue;
+    const path = svgNode('path');
+    path.setAttribute('class', `link${b.kind === 'category' ? ' is-child' : ''}`);
+    const y1 = p.y + p.r;
+    const y2 = b.y - b.r;
+    if (typeof b._entryX === 'number' && typeof b._busY === 'number') {
+      // 布局给的绕行通道：父球底贴着出来（在首行连线展开之前）→ 横移到通道
+      // → 竖直下来（穿过上面几行的空档）→ 进子球顶
+      const yA = y1 + 6;
+      const pts = [
+        { x: p.x, y: y1 },
+        { x: p.x, y: yA },
+        { x: b._entryX, y: yA },
+        { x: b._entryX, y: b._busY },
+        { x: b.x, y: b._busY },
+        { x: b.x, y: y2 },
+      ];
+      path.setAttribute('d', roundedPath(pts, 10));
+    } else {
+      // 首行子球（或拖动后的自由位置）：竖向贝塞尔，只走在父子之间的空档里
+      const my = (y1 + y2) / 2;
+      path.setAttribute('d', `M ${p.x} ${y1} C ${p.x} ${my}, ${b.x} ${my}, ${b.x} ${y2}`);
+    }
+    links.appendChild(path);
+  }
+
+  const balls = svgNode('g');
+  balls.setAttribute('class', 'balls');
+  svg.appendChild(balls);
+  for (const b of planBalls) {
+    const g = svgNode('g');
+    g.setAttribute('class', `ball ball-${b.kind}${planSelected === b.id ? ' is-selected' : ''}`);
+    g.setAttribute('transform', `translate(${Math.round(b.x)} ${Math.round(b.y)})`);
+    g.setAttribute('data-kind', b.kind);
+    g.setAttribute('data-ball', b.id);
+    g.setAttribute('data-label', b.label);
+    // 父球就是「这颗球挂在谁下面」：连线画得出来，验收也据它核对层级
+    if (b.parent) g.setAttribute('data-parent', b.parent);
+
+    const circle = svgNode('circle');
+    circle.setAttribute('r', String(b.r));
+    g.appendChild(circle);
+
+    const text = svgNode('text');
+    if (b.kind === 'root') {
+      // 根球：文字写在球里
+      text.setAttribute('x', '0');
+      text.setAttribute('y', '1');
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('font-size', '10');
+      text.textContent = b.label.slice(0, 4);
+    } else {
+      // 其余球：文字写在球下面、居中（分类/源文件夹的计数再往下一行）
+      text.setAttribute('x', '0');
+      text.setAttribute('y', String(b.r + 15));
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('font-size', b.kind === 'file' ? '10' : '12');
+      text.textContent = b.kind === 'file' ? b.label.slice(0, 12) : b.label;
+    }
+    g.appendChild(text);
+
+    if (b.kind === 'category' || b.kind === 'scope') {
+      const count = svgNode('text');
+      count.setAttribute('class', 'count');
+      count.setAttribute('x', '0');
+      count.setAttribute('y', String(b.r + 30));
+      count.setAttribute('text-anchor', 'middle');
+      const n =
+        b.kind === 'category'
+          ? (planGraph?.files ?? []).filter(
+              (f) => String(f.scope ?? '') === b.scope && String(f.category ?? '') === b.catPath,
+            ).length
+          : (planGraph?.files ?? []).filter((f) => String(f.scope ?? '') === b.scope).length;
+      count.textContent = `${n} 个`;
+      g.appendChild(count);
+    }
+
+    const title = svgNode('title');
+    title.textContent =
+      b.kind === 'file' ? b.source : b.kind === 'root' ? `输出：${outputDir ?? ''}` : planFullPath(b.scope, b.catPath);
+    g.appendChild(title);
+
+    g.addEventListener('pointerdown', (ev: Event) => {
+      ev.preventDefault();
+      const p = pointerPoint(ev as PointerEvent);
+      if (!p) return;
+      dragState = { node: b, el: g, downX: p.x, downY: p.y, lastX: p.x, lastY: p.y, moved: false };
+    });
+    // 点一下也能选中（拖动要靠 pointerdown，点选两条路都通）
+    g.addEventListener('click', () => {
+      if (suppressNextClick) return;
+      planSelected = b.id;
+      renderPlan(false);
+    });
+    balls.appendChild(g);
+  }
+}
+
+/** 画侧栏那排分类小块。 */
+function renderCatChips(cats: readonly PlanCategoryView[]): void {
+  el.planCats.textContent = '';
+  for (const c of cats) {
+    const chip = document.createElement('button');
+    chip.className = `cat-chip${planSelected === catId(c.scope, c.catPath) ? ' is-selected' : ''}`;
+    chip.textContent = `${c.name}（${c.total}）`;
+    chip.setAttribute('title', c.full);
+    chip.setAttribute('data-cat', catId(c.scope, c.catPath));
+    listen(chip, 'click', () => {
+      planSelected = catId(c.scope, c.catPath);
+      renderPlan(false);
+    });
+    el.planCats.appendChild(chip);
+  }
+}
+
+function smallButton(text: string, className: string, onClick: () => void): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.className = className;
+  b.textContent = text;
+  listen(b, 'click', onClick);
+  return b;
+}
+
+/** 「选中的球」那块：文件能换组、分类能改名/删除/挂到别处。 */
+function renderInspector(): void {
+  const box = el.planInspector;
+  box.textContent = '';
+  if (!planGraph) return;
+
+  const ball = planBalls.find((b) => b.id === planSelected) ?? null;
+  if (!ball) {
+    const hint = document.createElement('div');
+    hint.className = 'empty';
+    hint.textContent = '点一颗球，看它能怎么调';
+    box.appendChild(hint);
+    return;
+  }
+
+  const who = document.createElement('div');
+  who.className = 'who';
+  who.textContent =
+    ball.kind === 'file'
+      ? planBaseName(ball.source)
+      : ball.kind === 'category'
+        ? planFullPath(ball.scope, ball.catPath)
+        : ball.kind === 'scope'
+          ? `源文件夹：${ball.scope}`
+          : `输出：${outputDir ?? ''}`;
+  box.appendChild(who);
+
+  if (ball.kind === 'file') {
+    const where = document.createElement('div');
+    where.textContent = `现在在：${planFullPath(ball.scope, ball.catPath)}`;
+    box.appendChild(where);
+
+    const label = document.createElement('div');
+    label.className = 'hint';
+    label.textContent = '移到：';
+    box.appendChild(label);
+
+    const row = document.createElement('div');
+    row.className = 'row';
+    const candidates = categoriesOf(planGraph).filter(
+      (c) => c.scope === ball.scope && c.catPath !== ball.catPath,
+    );
+    for (const c of candidates.slice(0, 14)) {
+      row.appendChild(
+        smallButton(c.catPath, 'btn btn-sm', () => {
+          if (!planGraph) return;
+          planGraph = moveFileTo(planGraph, ball.source, c.scope, c.catPath);
+          planSelected = catId(c.scope, c.catPath);
+          setPlanNotice(`已把「${ball.label}」放进「${c.full}」`);
+          renderPlan(false);
+        }),
+      );
+    }
+    if (candidates.length === 0) {
+      const empty = document.createElement('span');
+      empty.className = 'hint';
+      empty.textContent = '这一组只有一个分类：先「新建分类」再挪';
+      row.appendChild(empty);
+    }
+    box.appendChild(row);
+    return;
+  }
+
+  if (ball.kind === 'category') {
+    const where = document.createElement('div');
+    where.textContent = `路径：${ball.catPath}　里面 ${categoriesOf(planGraph)
+      .filter((c) => c.scope === ball.scope && c.catPath === ball.catPath)
+      .reduce((n, c) => n + c.total, 0)} 个文件`;
+    box.appendChild(where);
+
+    const input = document.createElement('input');
+    input.className = 'name-field';
+    input.type = 'text';
+    input.value = ball.label;
+    input.setAttribute('data-role', 'rename');
+    box.appendChild(input);
+
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.appendChild(
+      smallButton('改名', 'btn btn-sm', () => {
+        if (!planGraph) return;
+        const next = String(input.value ?? '').trim();
+        if (next.length === 0) {
+          setPlanNotice('分类名不能为空');
+          return;
+        }
+        const parentPath = ball.catPath.split('\\').slice(0, -1).join('\\');
+        const target = parentPath ? `${parentPath}\\${next}` : next;
+        planGraph = renameCategory(planGraph, ball.scope, ball.catPath, target);
+        planSelected = catId(ball.scope, target);
+        setPlanNotice(`分类已改名为「${planFullPath(ball.scope, target)}」`);
+        renderPlan(false);
+      }),
+    );
+    row.appendChild(
+      smallButton('删除分类', 'btn btn-sm btn-danger-ghost', () => {
+        if (!planGraph) return;
+        planGraph = removeCategory(planGraph, ball.scope, ball.catPath);
+        planSelected = null;
+        setPlanNotice(`已删掉分类「${ball.label}」：里面的文件回到「${PLAN_UNCATEGORIZED}」，一个文件都没删`);
+        renderPlan(false);
+      }),
+    );
+    // 在这颗分类下面新建一个分支（子分类）
+    row.appendChild(
+      smallButton('新建子分类', 'btn btn-sm', () => {
+        planSelected = catId(ball.scope, ball.catPath);
+        addPlanCategory();
+      }),
+    );
+    box.appendChild(row);
+
+    const toLabel = document.createElement('div');
+    toLabel.className = 'hint';
+    toLabel.textContent = '挂到：';
+    box.appendChild(toLabel);
+
+    const toRow = document.createElement('div');
+    toRow.className = 'row';
+    toRow.appendChild(
+      smallButton('顶层', 'btn btn-sm', () => {
+        if (!planGraph) return;
+        planGraph = nestCategory(planGraph, ball.scope, ball.catPath, '');
+        planSelected = catId(ball.scope, ball.label);
+        setPlanNotice(`「${ball.label}」已挪回顶层`);
+        renderPlan(false);
+      }),
+    );
+    const parents = categoriesOf(planGraph).filter(
+      (c) =>
+        c.scope === ball.scope &&
+        c.catPath !== ball.catPath &&
+        !c.catPath.toLowerCase().startsWith(`${ball.catPath.toLowerCase()}\\`),
+    );
+    for (const c of parents.slice(0, 8)) {
+      toRow.appendChild(
+        smallButton(planFullPath(c.scope, c.catPath), 'btn btn-sm', () => {
+          if (!planGraph) return;
+          planGraph = nestCategory(planGraph, ball.scope, ball.catPath, c.catPath);
+          planSelected = catId(c.scope, `${c.catPath}\\${ball.label}`);
+          setPlanNotice(`「${ball.label}」已挂到「${c.full}」下面`);
+          renderPlan(false);
+        }),
+      );
+    }
+    box.appendChild(toRow);
+    return;
+  }
+
+  const hint = document.createElement('div');
+  hint.className = 'hint';
+  hint.textContent =
+    ball.kind === 'root'
+      ? '输出根：分类球都挂在它下面。把分类拖到它上面就是挪回顶层。'
+      : '源文件夹：它下面的分类与文件都在这个文件夹自己那份里。';
+  box.appendChild(hint);
+}
+
+/**
+ * 把整份方案画一遍（摘要、分类条、球、选中面板、给测试看的 JSON 快照）。
+ * `relayout=false` 时**保留每颗球现在的位置**（只是重画/刷新选中态）——
+ * 点选、拖动、改结构（连线/换组/改名/新建/嵌套）都走这一路，位置不会被弹回去；
+ * 只有两条路会整树重排：初始出方案，和用户手动点「重排」。
+ */
+function renderPlan(relayout = true): void {
+  if (!planGraph) {
+    if (el.planCard) el.planCard.hidden = true;
+    updateConfirmButton();
+    return;
+  }
+  if (el.planCard) el.planCard.hidden = false;
+  if (!stationCollapsed) {
+    stationCollapsed = true;
+    syncStation();
+  }
+
+  const cats = categoriesOf(planGraph);
+  const modeText = planMode === 'ai' ? 'AI 分法' : '规则分法';
+  el.planSummary.textContent = `${modeText} · ${planSummaryText(planGraph)}`;
+  el.planModeText.textContent = `${modeText} · ${cats.length} 个分类`;
+  renderCatChips(cats);
+
+  const prev = new Map(planBalls.map((b) => [b.id, b] as const));
+  planBalls = buildBalls(planGraph);
+  const hasSvg = el.planSvg && typeof (document as unknown as { createElementNS?: unknown }).createElementNS === 'function';
+  if (hasSvg) {
+    if (el.planCanvas && el.planSvg && el.planCanvas.firstElementChild !== el.planSvg) {
+      el.planCanvas.textContent = '';
+      el.planCanvas.appendChild(el.planSvg as unknown as Node);
+    }
+    wireSvg();
+    if (relayout || prev.size === 0) {
+      layoutBalls(planBalls);
+    } else {
+      // 保留每一颗球现在的位置（点选、拖动、改结构都不整树重排，重排只走「重排」按钮）。
+      // 结构改动冒出来的新球（改名/新建/换组后的新 id）在它父球旁边落位，别堆在原点。
+      let seed = 0;
+      for (const b of planBalls) {
+        const old = prev.get(b.id);
+        if (old) {
+          b.x = old.x;
+          b.y = old.y;
+          continue;
+        }
+        const p = b.parent ? planBalls.find((o) => o.id === b.parent) : null;
+        if (p) {
+          b.x = p.x + 34 + (seed % 4) * 26;
+          b.y = p.y + 66 + Math.floor(seed / 4) * 32;
+        } else {
+          b.x = 90;
+          b.y = 90 + seed * 34;
+        }
+        seed++;
+      }
+    }
+    drawBalls();
+  } else {
+    layoutBalls(planBalls);
+    renderPlanFallback(cats);
+  }
+  renderInspector();
+
+  el.planJson.textContent = JSON.stringify({
+    mode: planMode,
+    categories: cats.map((c) => ({ scope: c.scope, catPath: c.catPath, full: c.full, count: c.count, total: c.total })),
+    files: (planGraph.files ?? []).map((f) => ({
+      source: f.source,
+      name: f.name,
+      scope: f.scope,
+      category: f.category,
+      full: planFullPath(String(f.scope ?? ''), String(f.category ?? '')),
+    })),
+  });
+  updateConfirmButton();
   renderDirectionWarning();
 }
 
-el.preview.addEventListener('click', () => {
+/** 「新建分类」：挂在当前选中的分类下面（没选就是顶层）。 */
+function addPlanCategory(): void {
+  if (!planGraph) return;
+  const ball = planBalls.find((b) => b.id === planSelected) ?? null;
+  const scope = ball && ball.kind !== 'root' ? ball.scope : '';
+  const basePath = ball && ball.kind === 'category' ? ball.catPath : '';
+  const existing = new Set(categoriesOf(planGraph).map((c) => `${c.scope}\u0000${c.catPath.toLowerCase()}`));
+  let name = '新分类';
+  let i = 1;
+  let path = basePath ? `${basePath}\\${name}` : name;
+  while (existing.has(`${scope}\u0000${path.toLowerCase()}`)) {
+    i++;
+    name = `新分类${i}`;
+    path = basePath ? `${basePath}\\${name}` : name;
+  }
+  planGraph = addCategory(planGraph, scope, path);
+  planSelected = catId(scope, path);
+  setPlanNotice(`新建了分类「${planFullPath(scope, path)}」：把文件拖到它上面就归到这儿`);
+  renderPlan(false);
+}
+
+/* ---------------- 确认分拣 / 取消本次分拣 ---------------- */
+
+/** 取消：把方案丢掉，**一个文件、一个目录都不动**。 */
+function cancelPlan(): void {
+  if (running) return;
+  const had = planGraph !== null;
+  clearPlan(had ? '已取消本次分拣：没有复制、没有删除、也没有动源文件' : '');
+  setPlanNotice(had ? '已取消本次分拣：没有动任何文件' : '现在没有进行中的方案');
+  notice(had ? '已取消本次分拣（没有动任何文件）' : '');
+}
+
+/** 确认分拣：按方案落盘（只复制；源文件一个都不动）。 */
+function confirmPlan(): void {
   void (async () => {
-    clearPreview();
-    if (selectedFiles.length === 0) {
-      notice('还没有可预览的文件，先拖进来或点「选择文件」「选择文件夹」');
+    if (running || !planGraph) return;
+    const files = collectFiles();
+    if (files.length === 0) {
+      setPlanNotice('名单是空的，先投递文件');
       return;
     }
     if (!outputDir) {
-      notice('还没选输出文件夹，先点「选择输出文件夹」');
+      setPlanNotice('还没选输出位置');
       return;
     }
 
-    let outcome: PreviewOutcome;
+    // 最后一道出口校验：方向危险 → 直接拒绝，不调 organize（一个字节都不会写）
+    const before = await runDirectionCheck(files, selectedRoots.slice(), '');
+    if (before && before.ok !== true) {
+      const why = before.message && before.message.trim().length > 0 ? before.message : '输出方向不对';
+      setPlanNotice(`不能开工：${why}`);
+      return;
+    }
+
+    const assignments = assignmentsOf(planGraph);
+    if (assignments.length !== files.length) {
+      setPlanNotice(
+        `方案只覆盖了 ${assignments.length} / ${files.length} 个文件，先「重排」或重新生成方案再分拣`,
+      );
+      return;
+    }
+
+    const out = outputDir;
+    const roots = selectedRoots.slice();
+    const rules = rulesForUse();
+    const byAi = planMode === 'ai';
+
+    running = true;
+    updateConfirmButton();
+    el.list.textContent = '';
+    el.progress.textContent = `已处理 0 / 共 ${files.length}`;
+    if (el.progressBar) el.progressBar.style.width = '0%';
+    if (el.resultCard) el.resultCard.hidden = false;
+    setPlanNotice(byAi ? '正在按 AI 的分法落盘（只复制，不动源文件）…' : '正在按规则落盘（只复制，不动源文件）…');
+    scrollTo(el.resultCard);
+
     try {
-      // 本次预览要按「源文件夹各归各」分组：先把这批源文件夹放好，再点预览。
-      // 规则表就传当前界面上这一套：预览说哪个文件进哪个分类，执行时用的是同一套。
-      api.setSourceRoots(selectedRoots.slice());
-      outcome = await api.preview(selectedFiles.slice(), outputDir, rulesForUse());
-    } catch (err) {
-      notice(`预览没做出来：${(err as Error)?.message ?? '未知错误'}`);
-      return;
-    } finally {
-      // 只给这一次用：用完就清掉，免得残留给下一次（界面换名单后不会用上次的源文件夹）
-      try {
-        api.setSourceRoots([]);
-      } catch {
-        /* 清不掉也不影响本次结果 */
+      const summary = await api.organize(files, out, rules, roots.length > 0 ? roots : null, assignments);
+      el.progress.textContent = `已处理 ${summary.total} / 共 ${summary.total}`;
+      const parts = [`整理完成：成功 ${summary.successCount} 个，失败 ${summary.failureCount} 个`];
+      if (summary.plannedFolders && summary.plannedFolders.length > 0) {
+        const renamed = summary.plannedFolders.filter((f) => f.renamed).length;
+        parts.push(
+          `${roots.length} 个源文件夹各归各（共 ${summary.plannedFolders.length} 份${renamed > 0 ? `，其中 ${renamed} 份因同名改过输出名` : ''}）`,
+        );
       }
-    }
+      if (summary.skipped && summary.skipped.length > 0) parts.push(`跳过 ${summary.skipped.length} 处`);
+      el.summary.textContent = parts.join('；');
 
-    if (!outcome || outcome.ok !== true) {
-      notice(outcome && outcome.message ? outcome.message : '预览没做出来');
+      for (const p of summary.plannedFolders ?? []) {
+        if (!p.renamed) continue;
+        addToList(`[改名] ${p.sourcePath} → 输出里的 ${p.outputChain.join('\\')}`, 'ok');
+      }
+      for (const s of summary.skipped ?? []) addToList(`[跳过] ${s.fullPath} —— ${s.reason}`, 'fail');
+      mergeSkipped((summary.skipped ?? []).map((s) => ({ fullPath: s.fullPath, reason: s.reason, name: s.name, originKey: '' })));
+
+      if (summary.blocked === true) {
+        setPlanNotice(`不能开工：${summary.blockedReason ?? '输出方向不对'}`);
+        gateCheck = summary.direction ?? gateCheck;
+        renderDirectionWarning();
+        planDone = false;
+      } else {
+        notice(`输出目录：${summary.outputDir}`);
+        planDone = true;
+        if (el.planCard) el.planCard.hidden = true;
+        scrollTo(el.resultCard);
+        setPlanNotice(`分拣完了：${summary.successCount} 个进输出。要不要删源文件，由你在下面决定。`);
+        renderDeleteSources(summary.successCount);
+        await refreshUndo();
+        await refreshHistory();
+      }
+    } catch (err) {
+      setPlanNotice(`分拣中断：${(err as Error)?.message ?? '未知错误'}`);
+      el.summary.textContent = '整理完成：成功 0 个，失败 0 个（本次未跑完）';
+    } finally {
+      running = false;
+      updateConfirmButton();
+    }
+  })();
+}
+
+/* ---------------- 删源文件（用户明确确认才动） ---------------- */
+
+/** 这一轮复制成功几个（= 最多能删几个源文件）。 */
+let deletableSources = 0;
+
+function renderDeleteSources(successCount: number): void {
+  deletableSources = Math.max(0, Number(successCount) || 0);
+  el.delSrcCount.textContent =
+    deletableSources > 0 ? `这次复制成功 ${deletableSources} 个` : '这次没有复制成功的文件';
+  el.delSrcWarning.textContent =
+    deletableSources > 0
+      ? `删掉源文件 = 把这 ${deletableSources} 个原文件移到回收站；输出里那 ${deletableSources} 份不受影响，以后要恢复就从回收站还原。`
+      : '';
+  el.delSrcConfirm.checked = false;
+  el.delSrc.disabled = true;
+  el.delSrcReport.textContent = '';
+}
+
+listen(el.delSrcConfirm, 'change', () => {
+  el.delSrc.disabled = deletableSources === 0 || el.delSrcConfirm.checked !== true;
+});
+
+listen(el.delSrc, 'click', () => {
+  void (async () => {
+    if (el.delSrc.disabled) return;
+    if (el.delSrcConfirm.checked !== true) {
+      notice('先勾选「我确认」再删（这一步不可轻率）');
       return;
     }
+    const warn =
+      `要点「确定」才会动手：把这次复制成功的 ${deletableSources} 个源文件移到回收站，` +
+      `删空的源文件夹也一并删掉。输出里那 ${deletableSources} 份不受影响，源文件可以从回收站还原。`;
+    el.delSrcWarning.textContent = warn;
+    let yes = false;
+    try {
+      yes = window.confirm(warn) === true;
+    } catch {
+      yes = false;
+    }
+    if (!yes) return;
 
-    const tree = outcome.tree;
-    el.previewWarning.textContent = PREVIEW_WARNING;
-    // 方向危险时：把理由覆盖上去，并让「开始整理」不可点（在下面细说）
-    if (tree.outputDirection && tree.outputDirection.ok !== true) gateCheck = tree.outputDirection;
-    // 预览区**只给树**：这里不再写「做了什么 / 几个文件 / 沉了几层 / 计划输出到哪」那类说明旁白。
-    // 拦事故的那几样仍然照旧显示：方向危险那句警告（下面）、读不到文件与被跳过的原因（树里 + 下面那块）。
-    // 例外的只有散文件这一趟：那句话说清「预览用的是当前规则（共 N 条）」（规则编辑器那条验收钉着它）。
-    el.previewSummary.textContent =
-      tree.rulesApplied === true && tree.tracked !== true ? rulesSummaryText() : '';
-    renderPreviewTree(tree);
-    renderPreviewSkipped(tree);
-    // 最后一步再画方向警告：这时预览树已经画好，危险的那句话不会被后续赋值盖掉
-    renderDirectionWarning();
-    if (tree.outputDirection && tree.outputDirection.ok !== true) {
-      notice('输出方向危险：这次不许开工，一个字节都没写。请换一个跟源文件夹无关的输出文件夹。');
+    el.delSrc.disabled = true;
+    let outcome: SourceDeleteResultView | null = null;
+    try {
+      outcome = await api.deleteSources();
+    } catch (err) {
+      el.delSrcWarning.textContent = `删源文件失败：${(err as Error)?.message ?? '未知错误'}（没有删掉东西）`;
+      el.delSrc.disabled = false;
       return;
     }
-    notice('预览完成：这一步没有写任何文件');
+    if (!outcome) {
+      el.delSrcWarning.textContent = '删源文件没有结果';
+      return;
+    }
+    el.delSrcWarning.textContent = outcome.message;
+    el.delSrcReport.textContent = '';
+    for (const f of outcome.files ?? []) {
+      const line = document.createElement('div');
+      line.className = f.action === 'deleted' ? 'item ok' : 'item fail';
+      line.textContent = `[${f.action === 'deleted' ? '已删' : '跳过'}] ${f.source} —— ${f.reason}`;
+      el.delSrcReport.appendChild(line);
+    }
+    for (const d of outcome.dirs ?? []) {
+      const line = document.createElement('div');
+      line.className = d.action === 'removed' ? 'item ok' : 'item fail';
+      line.textContent = `[${d.action === 'removed' ? '目录已删' : '目录跳过'}] ${d.dir} —— ${d.reason}`;
+      el.delSrcReport.appendChild(line);
+    }
+    deletableSources = 0;
+    el.delSrcConfirm.checked = false;
+    notice(outcome.message);
+    await refreshHistory();
   })();
 });
 
-/** 名单或输出文件夹变了，上一次的预览就作废。 */
-function invalidatePreview(): void {
-  clearPreview();
+/* ---------------- 撤销上一次整理 ----------------
+ * 界面只负责「问一句 → 调一次 → 把人话报告摆出来」；真正删什么、不删什么全在 core/runRecord.ts。
+ */
+
+/** 撤销按钮当前指向的这一次记录（界面上要写「输出目录」）。 */
+let currentUndo: { count: number; outputDir: string } = { count: 0, outputDir: '' };
+
+/** 窗口内的二次确认：**问不出来就不删**。 */
+function confirmUndo(warn: string): boolean {
+  try {
+    return window.confirm(warn) === true;
+  } catch {
+    return false;
+  }
 }
+
+/** 撤销区的状态是否与记录一致：没有可撤销的整理 → 按钮不可点 + 说清原因。 */
+function renderUndoSummary(summary: UndoSummary | null): void {
+  const undoSpan = el.undoHint;
+  if (!summary || summary.available !== true) {
+    el.undo.disabled = true;
+    undoSpan.className = 'undo-hint';
+    undoSpan.textContent = summary && summary.reason ? summary.reason : '没有可撤销的整理';
+    return;
+  }
+  el.undo.disabled = false;
+  undoSpan.className = 'undo-hint undo-available';
+  undoSpan.textContent = summary.message;
+}
+
+/** 拉一次「上一次整理」的摘要，并把警告要用的数字记下来。 */
+async function refreshUndo(): Promise<void> {
+  let summary: UndoSummary | null = null;
+  try {
+    summary = await api.lastRun();
+  } catch {
+    summary = null;
+  }
+  currentUndo = {
+    count: summary && typeof summary.fileCount === 'number' ? summary.fileCount : 0,
+    outputDir: summary && summary.outputDir ? summary.outputDir : '',
+  };
+  renderUndoSummary(summary);
+}
+
+/** 撤销报告：一句总结 + 一条一条明细（删了的、跳过的都在）。 */
+function renderUndoReport(result: {
+  message: string;
+  files: { target: string; action: string; reason: string }[];
+  dirs: { dir: string; action: string; reason: string }[];
+}): void {
+  el.undoReport.textContent = '';
+  const head = document.createElement('div');
+  head.className = 'item undo-head';
+  head.textContent = result.message;
+  el.undoReport.appendChild(head);
+  for (const f of result.files ?? []) {
+    const line = document.createElement('div');
+    line.className = f.action === 'deleted' ? 'item undo-deleted' : 'item undo-skipped';
+    line.textContent = `[${f.action === 'deleted' ? '删除' : '跳过'}] ${f.target} —— ${f.reason}`;
+    el.undoReport.appendChild(line);
+  }
+  for (const d of result.dirs ?? []) {
+    const line = document.createElement('div');
+    line.className = d.action === 'removed' ? 'item undo-deleted' : 'item undo-skipped';
+    line.textContent = `[${d.action === 'removed' ? '清掉目录' : '跳过目录'}] ${d.dir} —— ${d.reason}`;
+    el.undoReport.appendChild(line);
+  }
+}
+
+listen(el.undo, 'click', () => {
+  void (async () => {
+    if (el.undo.disabled) return;
+    const n = currentUndo.count;
+    const warn =
+      `要点「确定」才会动手：只会删掉这次复制到输出目录的那 ${n} 个文件` +
+      `（输出目录：${currentUndo.outputDir}），以及由程序创建、撤销后变空的分类夹；` +
+      `源文件一个都不会动。整理之后你自己加过或改过的文件会被跳过。`;
+    el.undoWarning.textContent = warn;
+    if (!confirmUndo(warn)) return;
+
+    el.undo.disabled = true;
+    let outcome: { result: unknown; summary: unknown } | null = null;
+    try {
+      outcome = await api.undoLastRun();
+    } catch (err) {
+      el.undoWarning.textContent = `撤销失败：${(err as Error)?.message ?? '未知错误'}（没有删掉东西）`;
+      await refreshUndo();
+      return;
+    }
+    const result = (outcome?.result ?? null) as {
+      message: string;
+      files: { target: string; action: string; reason: string }[];
+      dirs: { dir: string; action: string; reason: string }[];
+    } | null;
+    if (!result) {
+      el.undoWarning.textContent = '撤销没有结果，请看下面的记录';
+      await refreshUndo();
+      return;
+    }
+    renderUndoReport(result);
+    el.undoWarning.textContent = '';
+    renderUndoSummary((outcome?.summary ?? null) as UndoSummary | null);
+    notice(result.message);
+  })();
+});
+
+/* ---------------- 历史单号 ---------------- */
+
+function renderHistory(entries: readonly HistoryEntryView[]): void {
+  el.historyList.textContent = '';
+  el.historyCount.textContent = entries.length > 0 ? `共 ${entries.length} 张` : '';
+  for (const entry of entries) {
+    const row = document.createElement('div');
+    row.className = 'history-row';
+
+    const ticket = document.createElement('span');
+    ticket.className = 'ticket';
+    ticket.textContent = entry.id;
+    row.appendChild(ticket);
+
+    const mode = document.createElement('span');
+    mode.className = entry.mode === 'ai' ? 'mode' : 'mode is-rules';
+    mode.textContent = entry.mode === 'ai' ? 'AI 分法' : '规则分法';
+    row.appendChild(mode);
+
+    const where = document.createElement('span');
+    where.className = 'where';
+    where.textContent = `${entry.fileCount} 个文件 · 成功 ${entry.successCount}${
+      entry.failureCount > 0 ? ` · 失败 ${entry.failureCount}` : ''
+    } · ${entry.outputDir || '（未记录输出目录）'}`;
+    where.setAttribute('title', where.textContent);
+    row.appendChild(where);
+
+    const open = smallButton('打开', 'btn btn-sm btn-ghost', () => {
+      if (entry.outputDir) void api.openPath(entry.outputDir);
+    });
+    row.appendChild(open);
+
+    el.historyList.appendChild(row);
+  }
+}
+
+async function refreshHistory(): Promise<void> {
+  let entries: HistoryEntryView[] = [];
+  try {
+    entries = await api.historyList();
+  } catch {
+    entries = [];
+    el.historyNotice.textContent = '历史读不出来（不影响分拣）';
+  }
+  renderHistory(Array.isArray(entries) ? entries : []);
+}
+
+listen(el.historyRefresh, 'click', () => {
+  void (async () => {
+    el.historyNotice.textContent = '';
+    await refreshHistory();
+  })();
+});
 
 /* ---------------- 分类规则（用户自定义，可存可读） ----------------
  * 「预览」和「开始整理」都带上当前这一套规则：两边用的是同一个求值函数（core 里那一份），
@@ -817,6 +2165,8 @@ function rowLabel(text: string): HTMLSpanElement {
   span.textContent = text;
   return span;
 }
+// 标签文字现在写进输入框的占位提示里（见 ruleRow），这个函数留着给别处复用
+void rowLabel;
 
 /** 一行规则里的一格输入（text / number / select 共用）。 */
 interface RuleFieldSpec {
@@ -985,38 +2335,48 @@ function ruleRow(rule: Rule, index: number): HTMLDivElement {
     },
   });
 
-  const upBtn = makeButton('↑ 上移', 'rule-up', () => {
+  const upBtn = makeButton('↑', 'rule-up', () => {
     if (index <= 0) return;
     const next = currentRules.slice();
     const [moved] = next.splice(index, 1);
     next.splice(index - 1, 0, moved);
     setRules(next);
   });
-  const downBtn = makeButton('↓ 下移', 'rule-down', () => {
+  upBtn.setAttribute('aria-label', '上移这条规则');
+  upBtn.setAttribute('title', '上移（更先命中）');
+  const downBtn = makeButton('↓', 'rule-down', () => {
     if (index >= currentRules.length - 1) return;
     const next = currentRules.slice();
     const [moved] = next.splice(index, 1);
     next.splice(index + 1, 0, moved);
     setRules(next);
   });
-  const delBtn = makeButton('删除', 'rule-delete', () => {
+  downBtn.setAttribute('aria-label', '下移这条规则');
+  downBtn.setAttribute('title', '下移');
+  const delBtn = makeButton('×', 'rule-delete', () => {
     setRules(currentRules.filter((_, i) => i !== index));
   });
+  delBtn.setAttribute('aria-label', '删除这条规则');
+  delBtn.setAttribute('title', '删除');
+
+  // 标签不再单独占一列：直接写进输入框的占位提示，行更短、也更容易扫
+  extInput.setAttribute('placeholder', '后缀，如 jpg / png');
+  keyInput.setAttribute('placeholder', '文件名含…');
+  minInput.setAttribute('placeholder', '最小');
+  minInput.setAttribute('title', '最小大小（MB）');
+  maxInput.setAttribute('placeholder', '最大');
+  maxInput.setAttribute('title', '最大大小（MB）');
+  timeSelect.setAttribute('title', '按修改时间筛');
 
   for (const child of [
     checkbox,
     order,
     nameInput,
     targetLabel,
-    rowLabel('后缀'),
     extInput,
-    rowLabel('文件名含'),
     keyInput,
-    rowLabel('大小MB'),
     minInput,
-    rowLabel('至'),
     maxInput,
-    rowLabel('时间'),
     timeSelect,
     upBtn,
     downBtn,
@@ -1230,11 +2590,8 @@ window.addEventListener('drop', (ev) => ev.preventDefault());
 
 /**
  * 把拖进来的文件/文件夹交给名单。
- * 路径只能由预加载脚本里的 webUtils.getPathForFile 取（File.path 在 Electron 32 起已被移除，44 上完全没有），
+ * 路径只能由预加载脚本里的 webUtils.getPathForFile 取（File.path 在 Electron 32 起已被移除），
  * 所以这里一律调 api.pathForFile，且不许留「先试 File.path」的后路。
- * 取不到路径不许静默：必须给人一句人话提示。
- * 拖进来的可能是文件夹（DataTransfer 里同样是 File 对象）：交给 acceptPaths 分派，
- * 是文件夹就递归展开成文件集合，并把「每个文件属于哪个源文件夹」一路带下去。
  */
 function createDropHandler(): (ev: DragEvent) => void {
   return (ev: DragEvent): void => {
@@ -1257,7 +2614,6 @@ function createDropHandler(): (ev: DragEvent) => void {
       return;
     }
 
-    // 数量对不上就说明有拿不到路径的（系统暂时给不出路径），如实说一句，不让整次拖入失败。
     const unreadableHint = unreadable > 0 ? `${unreadable} 个拖入项没拿到路径，已忽略` : '';
     void acceptPaths(paths, '拖入', unreadableHint);
   };
@@ -1265,16 +2621,15 @@ function createDropHandler(): (ev: DragEvent) => void {
 
 el.drop.addEventListener('drop', createDropHandler());
 
-/* ---------------- 按钮 ---------------- */
+/* ---------------- 投递站按钮 ---------------- */
 
-el.pickFiles.addEventListener('click', () => {
+listen(el.pickFiles, 'click', () => {
   void (async () => {
     const picked = await api.pickFiles();
     await acceptPaths(picked, '选择');
   })();
 });
 
-// 「选择文件夹」：与拖入文件夹是同一个能力（拖拽不灵时必须能走通），可多选。
 listen(el.pickFolders, 'click', () => {
   void (async () => {
     let picked: string[] = [];
@@ -1288,234 +2643,150 @@ listen(el.pickFolders, 'click', () => {
   })();
 });
 
+listen(el.toggleStation, 'click', () => {
+  stationCollapsed = !stationCollapsed;
+  syncStation();
+});
+
 listen(el.clearFiles, 'click', () => {
   selectedFiles = [];
   selectedRoots = [];
   scanResult = null;
   skippedPaths = [];
   refreshCounts();
-  invalidatePreview();
+  clearPlan();
   el.list.textContent = '';
   el.summary.textContent = '整理完成：成功 0 个，失败 0 个';
-  notice('已清空文件名单');
+  if (el.resultCard) el.resultCard.hidden = true;
+  el.progress.textContent = '已处理 0 / 共 0';
+  if (el.progressBar) el.progressBar.style.width = '0%';
+  setPlanNotice('');
+  notice('已清空（没有动任何文件）');
 });
 
-el.pickOut.addEventListener('click', () => {
+function pickOutputDirNow(): void {
   void (async () => {
     const dir = await api.pickOutputDir();
     if (dir) {
       outputDir = dir;
       renderOutDir();
-      invalidatePreview();
-      // 换了输出目录 = 方向可能变了：立刻重算一遍，危险的话「开始整理」马上变灰
-      await runDirectionCheck(collectFiles(), selectedRoots.slice(), '输出文件夹已选定（已顺手校验输出方向）');
+      clearPlan();
+      await runDirectionCheck(collectFiles(), selectedRoots.slice(), '输出位置已选定（已顺手校验输出方向）');
     }
   })();
-});
+}
 
-listen(el.openOut, 'click', () => {
+listen(el.pickOut, 'click', pickOutputDirNow);
+
+function openOutputDirNow(): void {
   if (!outputDir) {
-    notice('还没选输出文件夹');
+    notice('还没选输出位置');
     return;
   }
   void api.openPath(outputDir);
+}
+
+listen(el.openOut, 'click', openOutputDirNow);
+listen(el.openOut2, 'click', openOutputDirNow);
+
+/* ---------------- 分拣台按钮 ---------------- */
+
+listen(el.sortAi, 'click', () => {
+  void buildPlan('ai');
 });
 
-api.onProgress((p: OrganizeProgress) => {
+listen(el.sortRules, 'click', () => {
+  void buildPlan('rules');
+});
+
+// 「预览」：已经有方案就把它亮出来；还没有就按规则先算一份（之后随时可以换 AI）
+listen(el.preview, 'click', () => {
+  if (planGraph) {
+    renderPlan(false);
+    if (el.planCard) el.planCard.hidden = false;
+    scrollTo(el.planCard);
+    return;
+  }
+  if (collectFiles().length === 0) {
+    setPlanNotice('先把文件或文件夹投进来');
+    return;
+  }
+  void buildPlan('rules');
+});
+
+listen(el.planAdd, 'click', addPlanCategory);
+
+listen(el.planRelayout, 'click', () => {
+  // 重排 = 重新按树形布局排一遍（把自由拖动过的球都摆回整齐的位置）
+  renderPlan(true);
+  setPlanNotice('已重排（只改显示，方案不变）');
+});
+
+listen(el.planCancel, 'click', cancelPlan);
+listen(el.planConfirm, 'click', confirmPlan);
+
+/**
+ * 结果里那句话的「落到哪儿」：
+ *  - 进了分类夹 → 分类名（分类可以有层级，直接显示）；
+ *  - 原样保留（子文件夹里的文件）→ 输出里那一段相对目录（比「原路径」有用得多）；
+ *  - 实在算不出来才写「原路径」。
+ */
+function copyTargetLabel(result: { folder?: string; target?: string | null; finalName?: string }): string {
+  const folder = String(result.folder ?? '');
+  if (folder.length > 0) return folder;
+  const target = String(result.target ?? '');
+  if (target.length === 0) return '原路径';
+  const base = String(outputDir ?? '');
+  let rel = target;
+  if (base.length > 0 && target.toLowerCase().startsWith(base.toLowerCase())) rel = target.slice(base.length);
+  rel = rel.replace(/^[\\/]+/, '');
+  const name = String(result.finalName ?? '') || planBaseName(target);
+  if (name.length > 0 && rel.toLowerCase().endsWith(name.toLowerCase())) {
+    rel = rel.slice(0, rel.length - name.length);
+  }
+  const dir = rel.replace(/[\\/]+$/, '');
+  return dir.length > 0 ? dir : '输出根目录';
+}
+
+/** 复制进度：一条一条往结果里写（成功/失败都写，不隐藏）。 */
+if (typeof api.onProgress === 'function') api.onProgress((p: OrganizeProgress) => {
   el.progress.textContent = `已处理 ${p.done} / 共 ${p.total}`;
-  const name = p.result.source.split(/[\\/]/).pop() ?? p.result.source;
+  if (p.total > 0 && el.progressBar) {
+    el.progressBar.style.width = `${Math.round((p.done / p.total) * 100)}%`;
+  }
+  const name = planBaseName(p.result.source);
   if (p.result.ok) {
     const extra = p.result.renamed ? `（改名 ${p.result.finalName}）` : '';
-    addToList(`[成功] ${name} → ${p.result.folder}${extra}`, 'ok');
+    addToList(`[成功] ${name} → ${copyTargetLabel(p.result)}${extra}`, 'ok');
   } else {
     addToList(`[失败] ${name} → ${p.result.error ?? '未知原因'}`, 'fail');
   }
 });
 
-el.start.addEventListener('click', () => {
-  void (async () => {
-    if (running) return;
-    const files = collectFiles();
-    if (files.length === 0) {
-      notice('还没有可整理的文件，先拖进来或点「选择文件」「选择文件夹」');
-      return;
-    }
-    if (!outputDir) {
-      notice('还没选输出文件夹');
-      return;
-    }
-
-    const roots = selectedRoots.slice();
-    const out = outputDir;
-    const rules = rulesForUse();
-
-    // 最后一道出口校验：方向危险 → 直接拒绝，不调 organize（一个字节都不会写）
-    const before = await runDirectionCheck(files, roots, '');
-    if (before && before.ok !== true) {
-      const why = before.message && before.message.trim().length > 0 ? before.message : '输出方向不对';
-      notice(`不能开工：${why}`);
-      el.summary.textContent = '没有开始整理：输出方向危险，一个字节都没写。';
-      return;
-    }
-
-    running = true;
-    el.start.disabled = true;
-    el.list.textContent = '';
-    el.progress.textContent = `已处理 0 / 共 ${files.length}`;
-    notice(
-      roots.length > 0
-        ? `正在整理（只复制，不动原文件）：${roots.length} 个源文件夹各归各，绝不互相混…`
-        : '正在整理（只复制，不动原文件）…',
-    );
-
-    try {
-      // 与预览同一套规则、同一套源文件夹：预览说哪个文件进哪个分类夹，这里就必须一致。
-      // 源文件夹走的是那条老路（第 4 个参数），与 `setSourceRoots` 放下的那批同义。
-      const summary = await api.organize(files, out, rules, roots.length > 0 ? roots : null);
-      el.progress.textContent = `已处理 ${summary.total} / 共 ${summary.total}`;
-      const parts = [`整理完成：成功 ${summary.successCount} 个，失败 ${summary.failureCount} 个`];
-      if (summary.plannedFolders && summary.plannedFolders.length > 0) {
-        const renamed = summary.plannedFolders.filter((f) => f.renamed).length;
-        parts.push(`${roots.length} 个源文件夹各归各（共 ${summary.plannedFolders.length} 份${renamed > 0 ? `，其中 ${renamed} 份因同名改过输出名` : ''}）`);
-      }
-      if (summary.skipped && summary.skipped.length > 0) parts.push(`跳过 ${summary.skipped.length} 处`);
-      el.summary.textContent = parts.join('；');
-      // 同名源文件夹被改名时，一条条写清「哪个源路径 → 输出里叫什么」
-      for (const p of summary.plannedFolders ?? []) {
-        if (!p.renamed) continue;
-        addToList(`[改名] ${p.sourcePath} → 输出里的 ${p.outputChain.join('\\')}`, 'ok');
-      }
-      for (const s of summary.skipped ?? []) {
-        addToList(`[跳过] ${s.fullPath} —— ${s.reason}`, 'fail');
-      }
-      mergeSkipped((summary.skipped ?? []).map((s) => ({ fullPath: s.fullPath, reason: s.reason, name: s.name, originKey: '' })));
-      notice(`输出目录：${summary.outputDir}`);
-      // 本次整理已经记下来了（记录在主进程 userData 下）：刷新「撤销上一次整理」那一段
-      if (summary.blocked === true) {
-        notice(`不能开工：${summary.blockedReason ?? '输出方向不对'}`);
-        gateCheck = summary.direction ?? gateCheck;
-        renderDirectionWarning();
-      } else {
-        await refreshUndo();
-      }
-    } catch (err) {
-      notice(`整理中断：${(err as Error)?.message ?? '未知错误'}`);
-      el.summary.textContent = '整理完成：成功 0 个，失败 0 个（本次未跑完）';
-    } finally {
-      running = false;
-      updateStartButton();
-    }
-  })();
+/** AI 分批进度（文件多的时候看得到走到哪儿）。 */
+if (typeof api.onAiProgress === 'function') api.onAiProgress((p: AiSeedProgress) => {
+  el.progress.textContent = `AI 已看 ${p.done} / 共 ${p.total}`;
+  if (p.total > 0 && el.progressBar) {
+    el.progressBar.style.width = `${Math.round((p.done / p.total) * 100)}%`;
+  }
 });
 
-/* ---------------- 撤销上一次整理（本片新增） ----------------
- * 界面只负责「问一句 → 调一次 → 把人话报告摆出来」；真正删什么、不删什么全在 core/runRecord.ts。
- * 记录是持久化的（主进程 userData 下的 JSON），所以**关掉程序再打开，仍然能撤销上一次整理**。
- */
+/* ---------------- AI 状态（那行常显的「已配置 / 未配置」） ---------------- */
 
-/** 撤销按钮当前指向的这一次记录（界面上要写「输出目录」；主进程给的最新摘要）。 */
-let currentUndo: { count: number; outputDir: string } = { count: 0, outputDir: '' };
-
-/** 窗口内的二次确认：**问不出来就不删**（宁可少删，也不许不明不白地删）。 */
-function confirmUndo(warn: string): boolean {
+async function refreshAiStatus(): Promise<void> {
   try {
-    return window.confirm(warn) === true;
-  } catch {
-    return false;
-  }
-}
-
-/** 撤销区的状态是否与记录一致：没有可撤销的整理 → 按钮不可点 + 说清原因。 */
-function renderUndoSummary(summary: UndoSummary | null): void {
-  const undoSpan = el.undoHint;
-  if (!summary || summary.available !== true) {
-    el.undo.disabled = true;
-    undoSpan.className = 'undo-hint';
-    undoSpan.textContent = summary && summary.reason ? summary.reason : '没有可撤销的整理';
-    return;
-  }
-  el.undo.disabled = false;
-  undoSpan.className = 'undo-hint undo-available';
-  undoSpan.textContent = summary.message;
-}
-
-/** 拉一次「上一次整理」的摘要（启动时、整理完成后、撤销完成后各一次），并把警告要用的数字记下来。 */
-async function refreshUndo(): Promise<void> {
-  let summary: UndoSummary | null = null;
-  try {
-    summary = await api.lastRun();
-  } catch {
-    summary = null;
-  }
-  currentUndo = {
-    count: summary && typeof summary.fileCount === 'number' ? summary.fileCount : 0,
-    outputDir: summary && summary.outputDir ? summary.outputDir : '',
-  };
-  renderUndoSummary(summary);
-}
-
-/** 撤销报告：一句总结 + 一条一条明细（删了的、跳过的都在）。 */
-function renderUndoReport(result: {
-  message: string;
-  files: { target: string; action: string; reason: string }[];
-  dirs: { dir: string; action: string; reason: string }[];
-}): void {
-  el.undoReport.textContent = '';
-  const head = document.createElement('div');
-  head.className = 'item undo-head';
-  head.textContent = result.message;
-  el.undoReport.appendChild(head);
-  for (const f of result.files ?? []) {
-    const line = document.createElement('div');
-    line.className = f.action === 'deleted' ? 'item undo-deleted' : 'item undo-skipped';
-    line.textContent = `[${f.action === 'deleted' ? '删除' : '跳过'}] ${f.target} —— ${f.reason}`;
-    el.undoReport.appendChild(line);
-  }
-  for (const d of result.dirs ?? []) {
-    const line = document.createElement('div');
-    line.className = d.action === 'removed' ? 'item undo-deleted' : 'item undo-skipped';
-    line.textContent = `[${d.action === 'removed' ? '清掉目录' : '跳过目录'}] ${d.dir} —— ${d.reason}`;
-    el.undoReport.appendChild(line);
-  }
-}
-
-listen(el.undo, 'click', () => {
-  void (async () => {
-    if (el.undo.disabled) return;
-    // 点之前给一句明确警告：只会删这次复制到输出目录的那 N 个文件，原文件不动（窗口内二次确认）
-    const n = currentUndo.count;
-    const warn =
-      `要点「确定」才会动手：只会删掉这次复制到输出目录的那 ${n} 个文件` +
-      `（输出目录：${currentUndo.outputDir}），以及由程序创建、撤销后变空的目录；` +
-      `原文件一个都不会动。整理之后你自己加过或改过的文件会被跳过。`;
-    el.undoWarning.textContent = warn;
-    if (!confirmUndo(warn)) return;
-
-    el.undo.disabled = true;
-    let outcome: { result: unknown; summary: unknown } | null = null;
-    try {
-      outcome = await api.undoLastRun();
-    } catch (err) {
-      el.undoWarning.textContent = `撤销失败：${(err as Error)?.message ?? '未知错误'}（没有删掉东西）`;
-      await refreshUndo();
+    const status = (await api.aiStatus()) as AiSeedStatus | null;
+    if (status && typeof status.label === 'string' && status.label.length > 0) {
+      el.aiStatus.textContent = status.label;
+      el.aiStatus.className = status.configured === true ? 'pill-status ai-ready' : 'pill-status';
       return;
     }
-    const result = (outcome?.result ?? null) as {
-      message: string;
-      files: { target: string; action: string; reason: string }[];
-      dirs: { dir: string; action: string; reason: string }[];
-    } | null;
-    if (!result) {
-      el.undoWarning.textContent = '撤销没有结果，请看下面的记录';
-      await refreshUndo();
-      return;
-    }
-    renderUndoReport(result);
-    el.undoWarning.textContent = '';
-    renderUndoSummary((outcome?.summary ?? null) as UndoSummary | null);
-    notice(result.message);
-  })();
-});
+  } catch {
+    /* 读不到就退回下面那句兜底，绝不把界面搞崩 */
+  }
+  el.aiStatus.textContent = 'AI 分类：未配置';
+  el.aiStatus.className = 'pill-status';
+}
 
 /* ---------------- AI 设置（接口地址 / 密钥 / 模型名） ----------------
  * 界面只负责「读出来摆上去、把用户改的存回去、点一下测连接」，真正的读写与请求都在核心那几个模块里。
@@ -1588,226 +2859,24 @@ listen(el.aiTest, 'click', () => {
   })();
 });
 
-/* ---------------- AI 建议：先看、能改（改规则）、确认采用 ----------------
- * 硬要求：**AI 只给建议**；采用之后就把建议变成「既有规则表里的规则」（条件 = 文件名在建议清单里），
- * 再走**既有的**预览 / 开始整理那条管线落盘 —— 界面绝不自己复制、也不自己建分类夹。
- * 「建议 → 规则」的换算与「每个文件落到哪」的求值都在核心那一处（同一个求值函数），界面只摆出来。
- */
 
-/** 这一次的 AI 建议（人确认之前只存在内存里；不确认什么都不改）。 */
-let pendingAiSuggestions: AiSeedAssignment[] = [];
-
-function renderAiSuggestions(): void {
-  el.aiSuggest.textContent = '';
-  if (pendingAiSuggestions.length === 0) return;
-  const byCategory = new Map<string, string[]>();
-  for (const a of pendingAiSuggestions) {
-    const list = byCategory.get(a.category) ?? [];
-    list.push(a.source.split(/[\\/]/).pop() ?? a.source);
-    byCategory.set(a.category, list);
-  }
-
-  const head = document.createElement('div');
-  head.className = 'ai-suggest-head';
-  head.textContent = `AI 建议（${pendingAiSuggestions.length} 个文件，分 ${byCategory.size} 类）—— 还没采用，采用之前不会动任何文件：`;
-  el.aiSuggest.appendChild(head);
-
-  for (const [category, names] of byCategory) {
-    const line = document.createElement('div');
-    line.className = 'item ai-suggest-item';
-    line.textContent = `${category}（${names.length}）：${names.slice(0, 8).join('、')}${names.length > 8 ? ' …' : ''}`;
-    el.aiSuggest.appendChild(line);
-  }
-
-  const row = document.createElement('div');
-  row.className = 'row';
-  const accept = makeButton('采用这些建议（变成规则）', 'ai-accept', () => {
-    void acceptAiSuggestions();
-  });
-  const drop = makeButton('不采用（丢掉建议）', 'ai-drop', () => {
-    pendingAiSuggestions = [];
-    renderAiSuggestions();
-    el.aiNotice.textContent = '已丢掉这次 AI 建议：规则没变，也没动任何文件。';
-  });
-  row.appendChild(accept);
-  row.appendChild(drop);
-  el.aiSuggest.appendChild(row);
-}
-
-/** 采用建议：换算成规则 → 摆进规则表 → 提醒用户点「预览」看一遍再「开始整理」。 */
-async function acceptAiSuggestions(): Promise<void> {
-  if (pendingAiSuggestions.length === 0) return;
-  let outcome: AiSeedRuleOutcome | null = null;
-  try {
-    outcome = await api.aiSuggestRules(pendingAiSuggestions, rulesForUse(), `ai-${Date.now().toString(36)}`);
-  } catch (err) {
-    el.aiNotice.textContent = `建议没能变成规则：${(err as Error)?.message ?? '未知错误'}（什么都没改）`;
-    return;
-  }
-  if (!outcome || !Array.isArray(outcome.rules) || outcome.rules.length === 0) {
-    el.aiNotice.textContent = '建议没能变成规则（没拿到可用的规则表），什么都没改';
-    return;
-  }
-  // 走既有的规则表：从这一刻起，预览与「开始整理」用的就是这套（含 AI 建议那条）
-  setRules(outcome.rules, true);
-  pendingAiSuggestions = [];
-  renderAiSuggestions();
-  const checks = outcome.checks ?? [];
-  const mismatched = checks.filter((c) => {
-    const want = checks.find((x) => x.source === c.source);
-    return !want;
-  }).length;
-  setRuleStatus(`已采用 AI 建议：${outcome.rules.length} 条规则（放在最前面优先命中）—— 记得点「保存规则」`);
-  el.aiNotice.textContent =
-    `已把 AI 建议变成规则（共 ${outcome.rules.length} 条，放在规则表最前面）。` +
-    `每个文件按这套规则算出来的分类和 AI 建议一致（核对了 ${checks.length} 个）${mismatched > 0 ? '（有对不上的，请看一眼规则表）' : ''}。` +
-    `下一步：点「预览」看一遍 → 再点「开始整理」（还是只复制、不动原文件）。`;
-  invalidatePreview();
-}
-
-/** 进度：AI 分类一批一批发出去时，界面上看得到走到哪儿了（老桩里没这个方法时静默跳过）。 */
-api.onAiProgress?.((p: AiSeedProgress) => {
-  if (!p || typeof p.done !== 'number') return;
-  el.aiNotice.textContent = `AI 正在分批分类：已发 ${p.done} / 共 ${p.total} 个文件…`;
-});
-
-/* ---------------- 换一种分法：AI 分类（先撤销、后 AI 的硬顺序照旧） ----------------
- * 用户要的那条路：整轮整理完觉得分得不好 → 先把这次复制出去的撤销掉 → 再换一种分法重来。
- * **顺序是硬要求**：① 撤销接口被调到 → ② 撤销成功之后才去调 AI 分类接口。
- *   - 撤销没成功（有文件删不掉）→ 如实显示撤销报告，**不往下调 AI**（不在没撤干净的状态上再叠一层）；
- *   - 没有可撤销的整理 → 只给一句提示，**不删任何东西**，也不调 AI；
- *   - 撤销成了、AI 没配置 → 说清「已撤销 N 个 + AI 分类还没配置」两层信息。
- * 与 AI 有关的实现只有 core/aiClassify.ts 一处；界面这里只调预加载暴露的那两个方法。
- */
-
-/** 撤销结果里那几个数字（界面只用人话 + 这几个数）。 */
-interface UndoOutcomeView {
-  result?: {
-    ok?: boolean;
-    message?: string;
-    deletedFiles?: number;
-    files?: { target: string; action: string; reason: string }[];
-    dirs?: { dir: string; action: string; reason: string }[];
-  } | null;
-  summary?: UndoSummary | null;
-}
-
-/**
- * 界面上那行**常显**的 AI 状态（不用点按钮就能看出「现在只有规则分类可用」）。
- * 文字由核心模块给（`api.aiStatus()`），界面照抄 —— 界面里不许再写死一份。
- */
-async function refreshAiStatus(): Promise<void> {
-  try {
-    const status = (await api.aiStatus()) as AiSeedStatus | null;
-    if (status && typeof status.label === 'string' && status.label.length > 0) {
-      el.aiStatus.textContent = status.label;
-      el.aiStatus.className = status.configured === true ? 'hint ai-ready' : 'hint';
-      return;
-    }
-  } catch {
-    /* 读不到就退回下面那句兜底，绝不把界面搞崩 */
-  }
-  el.aiStatus.textContent = 'AI 分类：未配置';
-  el.aiStatus.className = 'hint';
-}
-/** 把「撤销报告」画一遍（撤销失败时也要如实显示 —— 这正是它存在的意义）。 */
-function renderUndoOutcomeReport(view: UndoOutcomeView | null): void {
-  const result = view?.result;
-  if (!result) return;
-  renderUndoReport({
-    message: String(result.message ?? '撤销没有结果'),
-    files: (result.files ?? []) as { target: string; action: string; reason: string }[],
-    dirs: (result.dirs ?? []) as { dir: string; action: string; reason: string }[],
-  });
-}
-
-el.aiReclassify.addEventListener('click', () => {
-  void (async () => {
-    el.aiNotice.textContent = '';
-    renderUndoOutcomeReport(null);
-
-    // ① 先问清楚：有没有可撤销的整理（没有就只给一句提示，绝不删东西、也不调 AI）
-    let summary: UndoSummary | null = null;
-    try {
-      summary = (await api.lastRun()) as UndoSummary | null;
-    } catch {
-      summary = null;
-    }
-    currentUndo = {
-      count: summary && typeof summary.fileCount === 'number' ? summary.fileCount : 0,
-      outputDir: summary && summary.outputDir ? summary.outputDir : '',
-    };
-    renderUndoSummary(summary);
-
-    if (!summary || summary.available !== true) {
-      el.aiNotice.textContent = `没有可撤销的整理（${summary?.reason ?? '还没有整理过'}）：没有删任何东西，也没有换分法。`;
-      return;
-    }
-
-    // ② 先撤销：这一步必须在调 AI 之前（顺序是硬要求）
-    let outcome: UndoOutcomeView | null = null;
-    try {
-      outcome = (await api.undoLastRun()) as UndoOutcomeView;
-    } catch (err) {
-      el.aiNotice.textContent = `撤销失败：${(err as Error)?.message ?? '未知错误'}（没有删掉东西，也没有换分法）`;
-      await refreshUndo();
-      return;
-    }
-    const result = outcome?.result ?? null;
-    if (!result) {
-      el.aiNotice.textContent = '撤销没有结果，请看下面的记录；没有换分法';
-      await refreshUndo();
-      return;
-    }
-
-    renderUndoOutcomeReport(outcome);
-    renderUndoSummary((outcome?.summary ?? null) as UndoSummary | null);
-    notice(outcome?.result?.message ?? '');
-
-    // 撤销本身失败了（有文件删不掉）→ 如实显示报告，**不往下调 AI**
-    if (outcome?.result?.ok !== true) {
-      el.aiNotice.textContent = '撤销没有成功，这次不换分法：先按下面的撤销报告把没撤掉的处理掉';
-      el.aiReclassify.disabled = true;
-      return;
-    }
-
-    // ③ 撤销成功之后，才去问 AI 分类（真调用：分批发请求、失败一律明确失败并回落规则分类）
-    let ai: AiSeedClassifyOutcome | null = null;
-    try {
-      ai = (await api.aiClassify(collectFiles(), outputDir)) as AiSeedClassifyOutcome;
-    } catch (err) {
-      el.aiNotice.textContent = `本次已撤销（删掉 ${result.deletedFiles ?? 0} 个文件）。AI 分类没能调起来：${(err as Error)?.message ?? '未知错误'}（按规则分类照旧可用）`;
-      pendingAiSuggestions = [];
-      renderAiSuggestions();
-      return;
-    }
-    const aiMessage = ai && typeof ai.message === 'string' && ai.message.length > 0 ? ai.message : 'AI 分类没有结果。';
-    // 失败（没配置 / 连不上 / 超时 / 回的看不懂）：说清原因 + 明确回落规则分类，一个文件都不动
-    if (ai?.ok !== true) {
-      pendingAiSuggestions = [];
-      renderAiSuggestions();
-      el.aiNotice.textContent = `本次已撤销（删掉 ${result.deletedFiles ?? 0} 个文件）。${aiMessage}——这次没有采用任何 AI 建议，也没有复制或删除任何文件；先按规则分类整理即可。`;
-      await refreshAiStatus();
-      return;
-    }
-    // 成功：先把建议摆出来给人看（**还没采用**），确认之后才变成规则、再走既有管线落盘
-    pendingAiSuggestions = Array.isArray(ai.assignments) ? ai.assignments.slice() : [];
-    renderAiSuggestions();
-    el.aiNotice.textContent = `本次已撤销（删掉 ${result.deletedFiles ?? 0} 个文件）。${aiMessage}——下面是 AI 建议（还没采用，采用之前不会动任何文件）。`;
-    await refreshAiStatus();
-  })();
-});
+/* ---------------- 启动 ---------------- */
 
 refreshCounts();
 renderOutDir();
+renderDeleteSources(0);
+updateConfirmButton();
 // 启动时自动读上次保存的规则（读不到就默认规则 + 人话提示，这里绝不崩）
 void initRules();
-// 启动时顺手报一次「上一次整理」的状态：有可撤销的 → 按钮可点；没有 / 已撤过 → 按钮不可点 + 说清原因。
-// 记录在主进程 userData 下（持久化），所以关掉程序再打开，上一次整理仍然可撤。
+// 上一次整理的记录（持久化）：有可撤销的 → 按钮可点；没有 / 已撤过 → 按钮不可点 + 说清原因
 void refreshUndo();
-// 启动时顺手把「AI 分类：未配置 / 已配置」那行状态显出来：不用点按钮就知道现在能不能用 AI 分法。
+// 「AI 分类：已配置 / 未配置」那行状态：不用点按钮就知道现在能不能用 AI 分法
 void refreshAiStatus();
-// 启动时把上次保存的 AI 设置读回来摆上（密钥不回显，只显示「已保存 N 位」）
+// 上次保存的 AI 设置读回来摆上（密钥不回显，只显示「已保存 N 位」）
 void loadAiConfigToForm();
-// 方向校验：界面刚起来时名单是空的，先算一遍（结论就是「还没有可整理的文件」）
+// 方向校验：界面刚起来时名单是空的，先算一遍
 refreshDirectionNow();
+// 历史单号（读不到就是空表，不影响分拣）
+void refreshHistory();
+// 落到默认那一页（#/inbox）；hash 里已经有页面时按 hash 来
+renderRoute();

@@ -2,114 +2,301 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<title>文件批量整理器</title>
+<title>文件分拣站</title>
+<link rel="icon" href="../assets/icon.png" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h1>文件批量整理器</h1>
-  <p class="safety">原文件不会被删除，也不会被移动 —— 全程只做复制。</p>
 
-  <div id="drop" class="drop">
-    把文件或<b>文件夹</b>拖到这里<br />
-    <span class="hint">（支持一次拖入多个；拖入的文件夹会整个展开，
-      每个源文件夹在输出里各占一份、各归各 —— 不同文件夹的文件绝不会混进同一个分类夹）</span>
-  </div>
+<div class="shell">
 
-  <div class="row">
-    <button id="pick-files">选择文件</button>
-    <button id="pick-folders">选择文件夹</button>
-    <span id="file-count">已选 0 个文件</span>
-    <button id="clear-files">清空名单</button>
-  </div>
-  <p class="hint">「选择文件夹」可以多选；它和拖入文件夹是同一件事（拖拽不灵时走这里）。</p>
-  <div id="skipped" class="skipped"></div>
+  <!-- ============ 侧栏 ============ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <img class="brand-mark" src="../assets/icon.png" alt="拣分站图标" draggable="false" />
+      <div>
+        <div class="brand-name">拣分站</div>
+        <div class="brand-sub">SORT STATION</div>
+      </div>
+    </div>
 
-  <div class="row">
-    <button id="pick-out">选择输出文件夹</button>
-    <span id="out-dir">未选择输出文件夹</span>
-  </div>
+    <nav class="nav">
+      <a class="nav-item" href="#/inbox" data-route="inbox">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13h4l2 3h4l2-3h4"/><path d="M4 13 6.5 5h11L20 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
+        <span class="nav-text">投递</span>
+        <span class="count" id="nav-count">0</span>
+      </a>
+      <a class="nav-item" href="#/rules" data-route="rules">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9"/><path d="M17 7h3"/><circle cx="15" cy="7" r="2"/><path d="M4 17h3"/><path d="M11 17h9"/><circle cx="9" cy="17" r="2"/></svg>
+        <span class="nav-text">规则</span>
+      </a>
+      <a class="nav-item" href="#/history" data-route="history">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v14H4z"/><path d="M8 9h8"/><path d="M8 13h5"/></svg>
+        <span class="nav-text">历史单号</span>
+      </a>
+      <a class="nav-item" href="#/settings" data-route="settings">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.36a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.64 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.64 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.64a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.36 9c.26.62.87 1.02 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z"/></svg>
+        <span class="nav-text">设置</span>
+      </a>
+    </nav>
 
-  <div class="row">
-    <button id="preview">预览（先看会怎么分）</button>
-    <button id="start" class="primary">开始整理</button>
-    <span id="progress">已处理 0 / 共 0</span>
-    <button id="open-out">打开输出文件夹</button>
-  </div>
+    <div class="sidebar-foot">
+      <svg class="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4.5" y="10.5" width="15" height="9.5" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg>
+      只复制，不动原件
+    </div>
+  </aside>
 
-  <p id="notice" class="notice"></p>
+  <!-- ============ 主区 ============ -->
+  <main class="main" id="main">
 
-  <h2>分类规则（从上往下，第一条命中的生效）</h2>
-  <div class="row">
-    <span id="rule-count" class="rule-count">当前共 0 条规则</span>
-    <button id="rule-add">新增规则</button>
-    <button id="rule-default">恢复默认规则</button>
-    <button id="rule-save">保存规则</button>
-    <button id="rule-load">加载规则</button>
-  </div>
-  <p class="hint">规则名就是输出里的分类文件夹名；同一条规则里不同种类的条件之间是「并且」，同一种里多个值是「或者」。都不命中的进「05_其他」。</p>
-  <div id="rule-list" class="rule-list"></div>
-  <p id="rule-status" class="rule-status"></p>
+    <!-- ==================== 投递（唯一的主页面） ==================== -->
+    <section class="view" id="view-inbox" hidden>
+      <header class="topbar">
+        <div>
+          <div class="crumb">分拣台</div>
+          <h1>文件分拣站</h1>
+        </div>
+        <div class="topbar-actions">
+          <span class="pill-status" id="ai-status">AI 分类：未配置</span>
+          <button class="btn btn-ghost" id="open-out">打开输出</button>
+        </div>
+      </header>
 
-  <h2>预览</h2>
-  <p id="preview-warning" class="preview-warning"></p>
-  <p id="preview-summary" class="summary"></p>
-  <p class="hint">拖入文件夹时，下面<b>按源文件夹分组</b>：每个源文件夹（含它下面的每一层子文件夹）各占一份，
-    各归各，不同源文件夹的文件绝不会混进同一个分类夹。点一行可以展开/收起。</p>
-  <div id="preview-tree" class="preview-tree"></div>
-  <div id="preview-skipped" class="skipped"></div>
+      <!-- 投递站 -->
+      <section class="card" id="inbox-card">
+        <div class="card-head">
+          <div class="card-title">投递站 <span class="sub" id="file-count">已选 0 个文件</span></div>
+          <div class="head-actions">
+            <button class="btn btn-sm" id="pick-files">选择文件</button>
+            <button class="btn btn-sm" id="pick-folders">选择文件夹</button>
+            <button class="btn btn-sm" id="pick-out">输出位置</button>
+            <button class="btn btn-sm btn-ghost" id="toggle-station" hidden>展开投递站</button>
+            <button class="btn btn-sm btn-ghost" id="clear-files">清空</button>
+          </div>
+        </div>
+        <div class="station">
+          <div class="dropzone" id="drop">
+            <div class="dz-inner">
+              <div class="dz-title">把文件或文件夹拖进来</div>
+              <div class="dz-sub">支持多个；文件夹各自独立分拣</div>
+            </div>
+          </div>
 
-  <h2>处理结果</h2>
-  <div id="file-list" class="list"></div>
+          <div class="station-side">
+            <div class="path-box empty" id="out-dir">
+              <svg class="ico" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4L10 8h9.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>
+              还没有选择输出位置
+            </div>
+            <div class="tray" id="tray"></div>
+            <div class="toastline" id="notice"></div>
+            <div class="toastline warn" id="skipped"></div>
+          </div>
+        </div>
+      </section>
 
-  <h2>总结</h2>
-  <p id="summary" class="summary">整理完成：成功 0 个，失败 0 个</p>
+      <!-- 分拣台 -->
+      <section class="card" id="sort-card">
+        <div class="card-head">
+          <div class="card-title">分拣台 <span class="sub" id="plan-mode">先选一种分法，再预览</span></div>
+          <div class="head-actions">
+            <button class="btn btn-sm btn-ghost" id="preview">预览</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="mode-row">
+            <button class="mode-btn is-primary" id="sort-ai">
+              <b>AI 分拣</b>
+              <span>看懂文件名，沿用你已有的文件夹</span>
+            </button>
+            <button class="mode-btn" id="sort-rules">
+              <b>规则分拣</b>
+              <span>按后缀、关键词、大小、修改时间</span>
+            </button>
+          </div>
+          <div class="progress-row">
+            <div class="progress"><i id="progress-bar"></i></div>
+            <span class="meta" id="progress">已处理 0 / 共 0</span>
+          </div>
+          <div class="toastline" id="plan-notice"></div>
+          <!-- 方向危险时就在这儿说，不用等预览画出来（危险方向下预览根本不会出现） -->
+          <div class="banner danger" id="plan-warning" style="margin-top:10px"></div>
+        </div>
+      </section>
 
-  <h2>撤销上一次整理</h2>
-  <div class="row">
-    <button id="undo">撤销上一次整理</button>
-    <span id="undo-hint" class="undo-hint">没有可撤销的整理</span>
-  </div>
-  <p class="hint">撤销只删「这次复制到输出目录的那些文件」以及由程序创建、撤销后变空的目录 ——
-    <b>原文件一个都不会动</b>。整理之后你自己往输出目录里加过、或改过的文件，撤销不会碰它（会跳过并说明）。</p>
-  <p id="undo-warning" class="danger"></p>
-  <div id="undo-report" class="list"></div>
+      <!-- 预览：关系链球 -->
+      <section class="card" id="plan-card" hidden>
+        <div class="card-head">
+          <div class="card-title">预览 <span class="sub" id="plan-summary"></span></div>
+          <div class="head-actions">
+            <button class="btn btn-sm" id="plan-add">新建分类</button>
+            <button class="btn btn-sm btn-ghost" id="plan-relayout">重排</button>
+            <button class="btn btn-sm btn-ghost" id="plan-cancel">取消本次分拣</button>
+            <button class="btn btn-sm btn-primary" id="plan-confirm">确认分拣</button>
+          </div>
+        </div>
+        <div class="plan-body">
+          <div class="plan-canvas" id="plan-canvas">
+            <svg id="plan-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+          </div>
+          <aside class="plan-side">
+            <div class="side-title">分类</div>
+            <div class="chip-list" id="plan-cats"></div>
+            <div class="side-title">选中的球</div>
+            <div class="inspector" id="plan-inspector"></div>
+          </aside>
+        </div>
+        <div class="plan-foot" id="plan-hint">
+          拖动小球摆位置；把文件小球拖到分类球上就连成一组；把分类球拖到另一个分类球上就是子分类。改完结构不会自动重排，点「重排」恢复整齐布局。
+        </div>
+        <pre id="plan-json" hidden></pre>
+      </section>
 
-  <h2>换一种分法</h2>
-  <div class="row">
-    <button id="ai-reclassify">换一种分法：AI 分类</button>
-    <span id="ai-status" class="hint">AI 分类：未配置</span>
-  </div>
-  <p class="hint">点了这个按钮会<b>先撤销上一次整理</b>（只删这次复制到输出目录的那份，原文件一个都不会动），
-    再换一种分法重来 —— 另一种分法就是 AI 分类。</p>
+      <!-- 本次结果 -->
+      <section class="card" id="result-card" hidden>
+        <div class="card-head">
+          <div class="card-title">本次结果 <span class="sub" id="summary">整理完成：成功 0 个，失败 0 个</span></div>
+          <div class="head-actions">
+            <button class="btn btn-sm" id="open-out-2">打开输出文件夹</button>
+          </div>
+        </div>
+        <div id="file-list" class="result-list"></div>
 
-  <h2>AI 设置</h2>
-  <p class="hint">填你自己的接口地址、密钥与模型名（默认按 DeepSeek 填好，也可以改成别的 OpenAI 兼容地址）。
-    <b>只把文件名、大小、修改时间发给模型：不读文件内容、不发文件内容，也不发文件所在目录。</b></p>
-  <div class="row">
-    <label class="ai-label" for="ai-endpoint">接口地址</label>
-    <input id="ai-endpoint" class="ai-input" type="text" placeholder="https://api.deepseek.com" />
-  </div>
-  <div class="row">
-    <label class="ai-label" for="ai-key">密钥</label>
-    <input id="ai-key" class="ai-input" type="password" autocomplete="off" placeholder="留空 = 不改动已保存的密钥" />
-  </div>
-  <div class="row">
-    <label class="ai-label" for="ai-model">模型名</label>
-    <input id="ai-model" class="ai-input" type="text" placeholder="deepseek-chat" />
-  </div>
-  <div class="row">
-    <button id="ai-save">保存 AI 设置</button>
-    <button id="ai-test">测试连接</button>
-    <span id="ai-config-status" class="hint">还没读设置</span>
-  </div>
-  <p class="hint"><b>密钥是明文存在这台电脑的配置文件里的，不会上传到别处，也请不要提交进代码仓库。</b>
-    （界面不会回显密钥本体，输入框是密码型；配置文件位置见下面那行。）</p>
-  <p id="ai-config-path" class="hint"></p>
-  <p id="ai-notice" class="notice"></p>
-  <div id="ai-suggest" class="ai-suggest"></div>
+        <div class="danger-zone" id="del-src-zone">
+          <div class="danger-head">
+            <b>源文件</b>
+            <span class="sub" id="del-src-count"></span>
+          </div>
+          <div class="banner danger" id="del-src-warning"></div>
+          <label class="check-line">
+            <input type="checkbox" id="del-src-confirm" />
+            <span>我确认：上面这些源文件已经不需要了，删掉它们（移到回收站，可以还原）</span>
+          </label>
+          <div class="danger-actions">
+            <button class="btn btn-sm btn-danger" id="del-src">删除源文件</button>
+            <span class="meta">输出里那份不受影响，只会动你确认的这些源文件</span>
+          </div>
+          <div class="result-list" id="del-src-report" style="padding:0"></div>
+        </div>
 
-  <!-- renderer.js 以 ES module 加载：编译产物里没有 CommonJS 的 exports 包装，
-     所以不会有 "exports is not defined" 这种启动即崩的问题 -->
+        <div class="undo-box">
+          <div class="undo-head-row">
+            <b>撤销这次分拣</b>
+            <span class="undo-state"><span class="dot"></span><span id="undo-hint">没有可撤销的整理</span></span>
+            <button class="btn btn-sm btn-danger-ghost" id="undo">撤销</button>
+          </div>
+          <div class="banner danger" id="undo-warning"></div>
+          <div class="result-list" id="undo-report" style="padding:0;max-height:220px"></div>
+        </div>
+      </section>
+    </section>
+
+    <!-- ==================== 规则 ==================== -->
+    <section class="view" id="view-rules" hidden>
+      <header class="topbar">
+        <div>
+          <div class="crumb">配置</div>
+          <h1>分拣规则</h1>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn" id="rule-default">恢复默认</button>
+          <button class="btn" id="rule-load">读取</button>
+          <button class="btn" id="rule-save">保存</button>
+          <button class="btn btn-primary" id="rule-add">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            新增规则
+          </button>
+        </div>
+      </header>
+
+      <div class="card">
+        <div class="rule-toolbar">
+          <span class="count" id="rule-count">当前共 0 条规则</span>
+          <span class="chip">从上往下，第一条命中生效</span>
+        </div>
+        <div id="rule-list" class="rule-list"></div>
+        <div style="padding:0 18px 14px">
+          <div class="toastline" id="rule-status"></div>
+        </div>
+      </div>
+
+      <span id="rule-csv" hidden></span>
+    </section>
+
+    <!-- ==================== 历史单号 ==================== -->
+    <section class="view" id="view-history" hidden>
+      <header class="topbar">
+        <div>
+          <div class="crumb">流水</div>
+          <h1>历史单号</h1>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn" id="history-refresh">刷新</button>
+        </div>
+      </header>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">分过的单 <span class="sub" id="history-count"></span></div>
+        </div>
+        <div class="history-list" id="history-list"></div>
+      </div>
+      <div class="toastline" id="history-notice"></div>
+    </section>
+
+    <!-- ==================== 设置 ==================== -->
+    <section class="view" id="view-settings" hidden>
+      <header class="topbar">
+        <div>
+          <div class="crumb">配置</div>
+          <h1>设置</h1>
+        </div>
+      </header>
+
+      <div class="settings-grid">
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title">AI 接口</div>
+            <span class="pill-status" id="ai-config-status">还没读设置</span>
+          </div>
+          <div class="card-body">
+            <div class="form-row">
+              <label class="form-label" for="ai-endpoint">接口地址</label>
+              <input id="ai-endpoint" class="field" type="text" placeholder="https://api.deepseek.com" />
+            </div>
+            <div class="form-row">
+              <label class="form-label" for="ai-key">密钥</label>
+              <input id="ai-key" class="field" type="password" autocomplete="off" placeholder="留空 = 不改动已保存的密钥" />
+              <div class="form-hint">密钥是明文存在这台电脑的配置文件里的，不会上传到别处，也请不要提交进代码仓库。</div>
+            </div>
+            <div class="form-row">
+              <label class="form-label" for="ai-model">模型名</label>
+              <input id="ai-model" class="field" type="text" placeholder="deepseek-chat" />
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-primary" id="ai-save">保存 AI 设置</button>
+              <button class="btn" id="ai-test">测试连接</button>
+            </div>
+            <div class="toastline" id="ai-config-path" style="word-break:break-all"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div class="card-title">数据与隐私</div></div>
+          <div class="card-body">
+            <div class="kv">
+              <span>发送内容</span><b>只把文件名、大小、修改时间发给模型</b>
+              <span>不发送</span><b>不读文件内容、不发文件内容</b>
+              <span>分拣方式</span><b>只复制，原文件默认不动</b>
+              <span>删源文件</span><b>只有你在结果里明确确认，才会把源文件移到回收站</b>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
 <script type="module" src="renderer.js"></script>
 </body>
 </html>

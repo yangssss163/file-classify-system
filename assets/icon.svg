@@ -1,0 +1,50 @@
+<!--
+  拣分站 · 软件图标（源文件）
+
+  这一份是唯一的手写源文件：改图标只改这里，再跑 npm run icon 重新出 PNG / ICO。
+  画面语义：绿色圆角方块（界面主色）里，三份文件露在文件夹口，正被归进同一个夹子，
+  也就是这软件干的事：拖进来一批 -> 按类分开 -> 只复制不动原件。
+  用法：
+    打包 / 窗口图标：assets/icon.ico（16/24/32/48/64 位图 + 128/256 PNG 条目）
+    界面内 / 文档用图：assets/icon.png（256×256，带透明）
+    矢量（打印、网页、再加工）：就是本文件
+  注意：颜色取自 src/renderer/style.css 里的 green 与 green-700 两个变量，改主题色时这里跟着改。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="拣分站：文件归入分类文件夹">
+  <defs>
+    <!-- 底：从亮绿到深绿的一竖条渐变，跟界面那枚「拣分绿」同源 -->
+    <linearGradient id="tile" x1="0" y1="0" x2="0.32" y2="1">
+      <stop offset="0" stop-color="#2acfa4" />
+      <stop offset="0.52" stop-color="#0ea47a" />
+      <stop offset="1" stop-color="#066b50" />
+    </linearGradient>
+    <!-- 顶上一道很淡的高光，别抢前景 -->
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.3" />
+      <stop offset="0.62" stop-color="#ffffff" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+
+  <!-- ① 圆角方块底 -->
+  <rect width="512" height="512" rx="116" fill="url(#tile)" />
+  <rect width="512" height="512" rx="116" fill="url(#sheen)" />
+
+  <!-- ② 文件夹后片：只露出夹口那一条，半透明白 = 「里面」 -->
+  <rect x="76" y="212" width="360" height="96" rx="22" fill="#ffffff" opacity="0.45" />
+
+  <!-- ③ 三份文件：底半截被前片挡住，深绿描边是为了彼此分开、也跟夹口分开 -->
+  <g stroke="#04614a" stroke-width="13" stroke-linejoin="round">
+    <rect x="96" y="148" width="80" height="152" rx="18" fill="#ffffff" />
+    <rect x="336" y="148" width="80" height="152" rx="18" fill="#ffffff" />
+    <rect x="196" y="122" width="120" height="178" rx="18" fill="#ffffff" />
+  </g>
+
+  <!-- ④ 文件夹前片：压在文件之上，于是文件看起来是「正在被收进去」 -->
+  <rect x="76" y="270" width="360" height="142" rx="26" fill="#ffffff" stroke="#04614a" stroke-width="13" />
+
+  <!-- ⑤ 前片上两道横线：夹子里装的都是文件（小尺寸下自然糊掉，不影响识别） -->
+  <g fill="#0ea47a">
+    <rect x="124" y="318" width="196" height="16" rx="8" opacity="0.4" />
+    <rect x="124" y="356" width="118" height="16" rx="8" opacity="0.24" />
+  </g>
+</svg>

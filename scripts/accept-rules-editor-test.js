@@ -309,7 +309,13 @@ async function runInWindowStub(source, label, organizer, options) {
   let error = null;
   try {
     const mod = new vm.SourceTextModule(source, { identifier: label });
-    await mod.link(() => {
+    await mod.link((specifier) => {
+      // 允许界面引用自己的纯数据模块（关系链球模型）；其它任何 import 一律不许
+      if (specifier === './planGraph.js') {
+        const dir = process.env.DSH_ACCEPT_OUT || path.join(__dirname, '..', 'out');
+        const target = path.join(dir, 'renderer', specifier);
+        return new vm.SourceTextModule(fs.readFileSync(target, 'utf8'), { identifier: target });
+      }
       throw new Error(`${label} must not import anything at load time`);
     });
     await mod.evaluate();
@@ -674,11 +680,10 @@ async function inspectAddRuleGoesFirst(productSource, label, expectedDefaultCoun
       ok(hit, `传给预览的规则表里没有刚配的关键词规则：${JSON.stringify(sent.map((r) => r.name))}`);
       eq(hit.name, '发票', '新规则的规则名');
       ok(sent.indexOf(hit) === 0, '新规则应当排在第一行（列表顺序 = 求值顺序，最优先命中）');
-      // 界面上还要能看出「预览用的是当前规则」
-      const warn = String((byId(live.elements, 'preview-warning') || {}).textContent || '');
-      const summary = String((byId(live.elements, 'preview-summary') || {}).textContent || '');
-      ok(/预览/.test(warn), `预览提示不对：「${warn}」`);
-      ok(/当前规则\s*（共\s*6\s*条/.test(summary), `预览说明里应当写清用的是当前规则共 6 条：「${summary}」`);
+      // 界面上还要能看出「预览用的是当前规则」（新界面把这句话放在分拣台的提示行 #plan-notice 里）
+      const noticeText = String((byId(live.elements, 'plan-notice') || {}).textContent || '');
+      ok(/预览/.test(noticeText), `预览提示不对：「${noticeText}」`);
+      ok(/当前规则\s*（共\s*6\s*条/.test(noticeText), `预览说明里应当写清用的是当前规则共 6 条：「${noticeText}」`);
     });
 
     await check('点「保存规则」→ 调到假的保存接口且参数里含刚配的规则；点「加载规则」→ 调到假的加载接口', async () => {
@@ -748,9 +753,9 @@ async function inspectAddRuleGoesFirst(productSource, label, expectedDefaultCoun
       log(`      不把规则传给预览的产物被抓到：${noRulesHits.slice(0, 3).join(' | ')}`);
 
       // 反过来：真产物里只把「传给预览的规则」这一项抽掉 → 必须被判失败（说明规则参数这一条探针是活的）
-      const liveTarget = 'api.preview(selectedFiles.slice(), outputDir, rulesForUse())';
+      const liveTarget = 'api.preview(files, outputDir, rulesForUse())';
       ok(rendererJs.indexOf(liveTarget) >= 0, '真产物里找不到「把规则传给预览」那一行（探针要钉的就是它）');
-      const crippled = rendererJs.split(liveTarget).join('api.preview(selectedFiles.slice(), outputDir)');
+      const crippled = rendererJs.split(liveTarget).join('api.preview(files, outputDir)');
       const crippledHits = await inspectRuleEditor(crippled, 'current-renderer-without-rules.js');
       ok(crippledHits.length > 0, '不把规则传给预览的产物被说 OK —— 探针是死的');
       log(`      只抽掉「规则传给预览」后的证据：${crippledHits.slice(0, 3).join(' | ')}`);

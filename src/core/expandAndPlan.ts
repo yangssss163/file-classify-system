@@ -60,6 +60,7 @@ import * as path from 'path';
 import { pickUniqueName, splitFileName, MAX_RENAME_ATTEMPTS } from './classify';
 import { classifyWithMeta } from './classifyWithMeta';
 import type { RuleTable } from './rules';
+import { categoryTableOf, type CategoryAssignment } from './plan';
 import { describeError } from './copyFiles';
 
 /** 递归深度上限：超过就停下并说明原因（防止循环/超深目录把程序拖死）。 */
@@ -222,6 +223,19 @@ export interface PlanOptions {
   scan: ScanResult & { tree: ScanNode[] };
   /** 分类规则表；只对「源文件夹自己那层根下的散文件」起作用；不传就用默认规则 */
   rules?: RuleTable | null;
+  /**
+   * 显式分类表（小写完整路径 → 归一化后的分类路径）。
+   * 给了它的文件**不再按规则算分类名**；没给（或不在表里）的照旧按规则算。
+   * 只影响「本来就会按规则建分类夹」的那些散文件，子文件夹里的文件仍原样保留。
+   */
+  assignments?: ReadonlyMap<string, string> | null;
+  /**
+   * 这次给进来的 `assignments` 是不是「最终定稿的方案」（用户在预览里确认过的那份）。
+   * 默认 false = 建议性质的分类（比如 AI 给的）：只对「本来就会按规则建分类夹」的散文件起作用，
+   * 子文件夹里的文件仍原样保留；为 true 时，**表里有的文件一律按它给的分类落盘**，
+   * 相对的是「这个源文件夹在输出里的落点」（子文件夹里的文件也能被手动挪到别的分类）。
+   */
+  assignmentsAreFinal?: boolean;
 }
 
 export interface PlanResult {
@@ -513,6 +527,10 @@ export function buildPlan(options: PlanOptions): PlanResult {
   const outputDir = String(options?.outputDir ?? '');
   const scan = options?.scan ?? { files: [], folders: [], skipped: [], tree: [] };
   const rules = options?.rules ?? null;
+  /** 这次「谁去哪个夹」如果调用方已经给了结论（比如 AI 分好了），就按它走；没给的仍按规则算。 */
+  const assignments = options?.assignments ?? null;
+  /** 见 `PlanOptions.assignmentsAreFinal`：true 时表里的文件（含子文件夹里的）一律按它给的分类落盘。 */
+  const assignmentsAreFinal = options?.assignmentsAreFinal === true;
   const usedByScope = new Map<string, Set<string>>();
   /** 目标目录（小写）→ 已经用掉的文件名，避免同一批里重名互撞 */
   const takenByDir = new Map<string, Set<string>>();
@@ -549,6 +567,7 @@ export function buildPlan(options: PlanOptions): PlanResult {
     outputDirPath: string,
     classifyHere: boolean,
     renamed: boolean,
+    rootOutputDir: string,
   ): PlannedFolder => {
     const planned: PlannedFolder = {
       origin: node.origin,
@@ -572,7 +591,7 @@ export function buildPlan(options: PlanOptions): PlanResult {
       const childName = child.origin.chain[child.origin.chain.length - 1];
       const picked = pickUniqueFolderName(childName, '\u0000' + outputDirPath.toLowerCase(), usedByScope);
       const childDir = joinedPath(outputDirPath, picked.name);
-      planned.subfolders.push(processNode(child, picked.name, childDir, false, picked.renamed));
+      planned.subfolders.push(processNode(child, picked.name, childDir, false, picked.renamed, rootOutputDir));
     }
 
     // ② 这一层根下的文件：**同一套规矩**（不给谁开特例）。规矩 = 「同名就往下沉，沉到底」：
@@ -581,7 +600,7 @@ export function buildPlan(options: PlanOptions): PlanResult {
     //    一次都没沉成（连第一层都没有同名的）→ 按规则新建分类夹。
     //    明细见 `sinkOne()`。
     for (const file of node.looseFiles) {
-      sinkOne(node, file, planned, outputDirPath, /* allowClassify */ classifyHere);
+      sinkOne(node, file, planned, outputDirPath, /* allowClassify */ classifyHere, rootOutputDir);
     }
     planned.categories.sort((a, b) => a.category.localeCompare(b.category));
 
@@ -621,12 +640,41 @@ export function buildPlan(options: PlanOptions): PlanResult {
     top: PlannedFolder,
     outputDirPath: string,
     allowClassify: boolean,
+    rootOutputDir: string,
   ): void => {
     const stem = splitFileName(file.name).stem;
     // 规则求值：`matched.folder` 已是**归一化之后**的分类路径（可以有多级：`照片\风光`）。
     // `matched.invalidReason` 非空 = 规则名危险（绝对路径 / `..` / 非法字符…）→ 这个文件落到兜底分类，
     // 并把那句人话原因带上；**绝不**按危险名字建目录。
-    const matched = classifyWithMeta(rules, file.fullPath, file.name);
+    //
+    // 如果这次调用方已经给了「这个文件去哪个夹」（AI 分好的结论），就直接用它 ——
+    // 它同样在进表之前归一化过，危险名字根本到不了这里；表里没有的照旧按规则算。
+    const given = assignments?.get(file.fullPath.toLowerCase());
+
+    // 最终定稿方案（用户确认过的那份）：表里有的文件**一律**按它给的分类落盘，相对的是源文件夹落点。
+    // 这样「手动把子文件夹里的文件拖到别的分类」才会真的生效，而不是被「子文件夹原样保留」吃掉。
+    if (assignmentsAreFinal && given && given.length > 0) {
+      const categoryDir = joinedPath(rootOutputDir, given);
+      const placed = placeName(categoryDir, file.name);
+      const entry: PlannedFile = {
+        fullPath: file.fullPath,
+        name: placed.name,
+        origin: node.origin,
+        targetDir: categoryDir,
+        placement: 'classify',
+        category: given,
+        originChain: node.origin.chain.slice(),
+        mergeReason: '按预览里定稿的分类落盘',
+        renamed: placed.renamed,
+      };
+      files.push(entry);
+      return;
+    }
+
+    const matched =
+      given && given.length > 0
+        ? { folder: given, invalidReason: '' }
+        : classifyWithMeta(rules, file.fullPath, file.name);
     const categoryName = matched.folder;
     /** 按规则新建的分类夹目录（多级就是「这一层 + 各层名字」拼出来的那条路径）。 */
     const categoryDir = joinedPath(outputDirPath, categoryName);
@@ -858,7 +906,7 @@ export function buildPlan(options: PlanOptions): PlanResult {
     const picked = pickUniqueFolderName(node.origin.rootName, '\u0000<输出根>', usedByScope);
     const rootOutputDir = targetDirOf(outputDir, [picked.name]);
     // 顶层源文件夹：这一层根下的散文件按规则分类/下沉
-    const subtree = processNode(node, picked.name, rootOutputDir, true, picked.renamed);
+    const subtree = processNode(node, picked.name, rootOutputDir, true, picked.renamed, rootOutputDir);
     roots.push({
       origin: node.origin,
       outputName: picked.name,
@@ -894,6 +942,10 @@ export interface FolderPlanInput {
   /** 输出根目录（可以还不存在——预览绝不创建它） */
   outputDir: string | null;
   rules?: RuleTable | null;
+  /** 显式分类（`source` 完整路径 → `category` 分类名）；给了就优先于规则，见 `categoryTableOf` */
+  assignments?: readonly CategoryAssignment[] | null;
+  /** 这次的 assignments 是不是「最终定稿的方案」（用户确认过的那份），语义见 `PlanOptions.assignmentsAreFinal` */
+  assignmentsAreFinal?: boolean;
 }
 
 /**
@@ -904,6 +956,12 @@ export function planFolders(input: FolderPlanInput): FolderPlanOutcome {
   const roots = Array.from(input?.roots ?? []).map((r) => String(r));
   const scan = expandFolders(roots);
   const outputDir = input?.outputDir === null || input?.outputDir === undefined ? '' : String(input.outputDir);
-  const plan = buildPlan({ outputDir, scan, rules: input?.rules ?? null });
+  const plan = buildPlan({
+    outputDir,
+    scan,
+    rules: input?.rules ?? null,
+    assignments: categoryTableOf(input?.assignments),
+    assignmentsAreFinal: input?.assignmentsAreFinal === true,
+  });
   return { plan, scan, tree: scan.tree };
 }

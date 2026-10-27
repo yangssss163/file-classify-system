@@ -560,7 +560,13 @@ async function runInWindowStub(source, label, organizer) {
 
   try {
     const mod = new vm.SourceTextModule(source, { identifier: label });
-    await mod.link(() => {
+    await mod.link((specifier) => {
+      // 允许界面引用自己的纯数据模块（关系链球模型）；其它任何 import 一律不许
+      if (specifier === './planGraph.js') {
+        const dir = process.env.DSH_ACCEPT_OUT || path.join(__dirname, '..', 'out');
+        const target = path.join(dir, 'renderer', specifier);
+        return new vm.SourceTextModule(fs.readFileSync(target, 'utf8'), { identifier: target });
+      }
       throw new Error(`${label} must not import anything at load time`);
     });
     await mod.evaluate();
@@ -639,6 +645,8 @@ const LEGACY_CLASSIFY_ALL_PRODUCT = [
 
 /* ------------------------------------------------------------------ *
  * 探针本体：拖入一个文件夹 → 走得通吗？
+ * （界面改成「关系链球」之后，预览区里画的是球，不再是文件树：
+ *  每个源文件夹一颗球，分类一颗球，文件挂在分类球下面。）
  * ------------------------------------------------------------------ */
 
 /**
@@ -647,7 +655,8 @@ const LEGACY_CLASSIFY_ALL_PRODUCT = [
  *  2. 拖入文件夹后真的调了 api.expand（递归展开）；
  *  3. 「已选 N 个文件」那句里能看出「来自 M 个文件夹」；
  *  4. 点「选择文件夹」会调到 api.pickFolders；
- *  5. 点预览后，预览区**按源文件夹分组**画出来（顶层分组节点 + 每份下面的分类夹）。
+ *  5. 点预览后，预览区**按源文件夹分组**画出来：每个源文件夹一颗球、分类与文件都挂在它下面；
+ *     预览区里只有球与名字，不再挂「做了什么 / 怎么判定的」过程说明。
  * @returns {string[]} 问题清单（空数组 = 没问题）
  */
 async function inspectFolderSupport(productSource, label, ctx) {
@@ -723,8 +732,7 @@ async function inspectFolderSupport(productSource, label, ctx) {
       return hits;
     }
     previewBtn.dispatch('click', { preventDefault() {} });
-    await flush();
-    await flush();
+    for (let i = 0; i < 12; i++) await flush();
 
     if (state.previewCalls.length === 0) {
       hits.push('点预览没有调用 api.preview');
@@ -742,69 +750,40 @@ async function inspectFolderSupport(productSource, label, ctx) {
       hits.push('预览时没有拿到源文件夹（roots 为空）——分组无从谈起');
     }
 
-    const summaryText = String((run.elements.get('preview-summary') || {}).textContent || '');
-    const warningText = String((run.elements.get('preview-warning') || {}).textContent || '');
-    const treeEl = run.elements.get('preview-tree');
-    if (!treeEl) {
-      hits.push('element never looked up: #preview-tree');
+    const noticeText = String((run.elements.get('plan-notice') || {}).textContent || '');
+    const summaryText = String((run.elements.get('plan-summary') || {}).textContent || '');
+    const canvasEl = run.elements.get('plan-canvas');
+    if (!canvasEl) {
+      hits.push('element never looked up: #plan-canvas');
       return hits;
     }
-    const treeText = textOf(treeEl);
+    const canvasText = textOf(canvasEl);
 
-    // 预览区「只给树」：说明旁白那一段（preview-summary）必须不再写任何东西
-    if (summaryText.trim().length > 0) {
-      hits.push(`预览区里还写着说明（preview-summary 不是空的：「${summaryText.slice(0, 120)}」）——预览区应当只有树`);
-    }
-    if (!/预览|没有复制|仍然/.test(warningText)) {
-      hits.push(`预览提示不对：「${warningText}」`);
-    }
-
-    /* ---------- 预览区只留树：不许出现任何「做了什么 / 怎么判定的」过程说明 ---------- */
-    // 这些短语只出现在过程说明里（说明已被删掉）；树本身（目录名 + 文件名）不该命中它们。
+    // 预览区里只有球与名字：不许再挂过程说明
     for (const word of NARRATION_WORDS) {
-      if (treeText.indexOf(word) >= 0) hits.push(`预览区里还留着过程说明「${word}」：${treeText.slice(0, 160)}`);
+      if (canvasText.indexOf(word) >= 0) hits.push(`预览区里还留着过程说明「${word}」：${canvasText.slice(0, 160)}`);
     }
-    // 树里每个节点只能有「名字」这一行标题：不许再挂一条「N 个文件」的统计旁白
-    for (const node of treeEl.children || []) {
-      if (/个文件/.test(String(node.textContent || ''))) {
-        hits.push(`预览树的分组标题上还写着「N 个文件」这种统计旁白：${String(node.textContent).slice(0, 90)}`);
+    if (summaryText.trim().length > 0) {
+      // 标题只该是一句概括（「规则分法 · N 个文件分 M 组…」），不能是过程说明
+      for (const word of NARRATION_WORDS) {
+        if (summaryText.indexOf(word) >= 0) hits.push(`预览标题里还写着过程说明「${word}」：「${summaryText}」`);
       }
     }
-    // 预览区里除了「跳过的那几处」这块（拦事故用的，必须留）之外，不该再挂别的说明块
-    for (const node of treeEl.children || []) {
-      const cls = String(node.className || '');
-      if (!/^(root|folder|folder hidden|skipped|skipped-item|skipped-head)$/.test(cls)) {
-        hits.push(`预览区里多了一个不该有的说明块（class="${cls}"）——预览区应当只有树`);
-      }
+    if (!/预览|没有复制|仍然/.test(noticeText)) {
+      hits.push(`预览提示不对：「${noticeText}」`);
     }
 
-    // 分组：每个顶层源文件夹一个分组节点；份内既有原样保留的子树，也有本层散文件的分类夹
-    const rootNodes = findByClass(treeEl, 'root');
-    if (rootNodes.length === 0) {
-      hits.push('预览树里没有源文件夹分组节点（class="root"）——没有按源文件夹分组');
-    } else if (!rootNodes.some((n) => hasNestedGroup(n, 'source'))) {
-      hits.push('预览树的分组节点下面没有「某一层源文件夹」这一层（class="source"）');
+    // 分组：每个源文件夹的名字都要作为一颗球画出来（分组就是「哪份归哪份」）
+    for (const root of ctx.roots) {
+      const name = path.basename(root);
+      if (canvasText.indexOf(name) < 0) hits.push(`预览里看不到源文件夹「${name}」这一组：${canvasText.slice(0, 160)}`);
     }
-    const sourceNodes = findByClass(treeEl, 'source');
-    const nestedSource = sourceNodes.filter((n) => hasNestedGroup(n, 'cat'));
-    if (nestedSource.length === 0) {
-      hits.push('预览树里每一份源文件夹下面没有分类夹节点（class="cat"）——散文件那条路说不清');
-    }
-
-    // 树照旧：原样保留的子树 + 分类夹都在（只去掉说明旁白，不去掉树本身）
-    const keepNodes = findByClass(treeEl, 'keep');
-    if (keepNodes.length === 0) {
-      hits.push('预览树里没有「原样保留的子树」节点（class="keep"）——子文件夹里的文件没画出来');
-    }
-
-    // 递归用例照旧：被一路沉下去的那个文件仍然出现在它落点那一层的目录里（只是不再标「沉了 N 层」）
-    if (treeText.indexOf('一路沉.jpg') < 0) hits.push('预览树里看不到被一路沉下去的「一路沉.jpg」');
-    // 能展开看到文件名 + 目录层都在
-    for (const want of ['下载', '照片', '文档', '婚纱', '另一处']) {
-      if (!new RegExp(want).test(treeText)) hits.push(`预览树里看不到「${want}」这一层：${treeText.slice(0, 120)}`);
+    // 分类/子文件夹那几层照旧都在（只去掉说明旁白，不去掉结构）
+    for (const want of ['照片', '文档', '婚纱', '一路沉']) {
+      if (!new RegExp(want).test(canvasText)) hits.push(`预览里看不到「${want}」这一层：${canvasText.slice(0, 160)}`);
     }
     for (const f of Object.keys(ctx.files)) {
-      if (treeText.indexOf(path.basename(f)) < 0) hits.push(`预览树里看不到文件「${path.basename(f)}」`);
+      if (canvasText.indexOf(path.basename(f)) < 0) hits.push(`预览里看不到文件「${path.basename(f)}」`);
     }
 
     return hits;
@@ -814,13 +793,13 @@ async function inspectFolderSupport(productSource, label, ctx) {
 }
 
 /**
- * **危险输出方向**（输出目录 = 某个源文件夹本身）在预览里会怎样。
- * 这一条是「预览区只留树」里必须留下的那样东西：拦事故的那句人话警告。
- * 真造这个场景（输出目录就是夹具里的源文件夹），跑真产物，逐条查：
- *  1. 预览区里写出那句人话警告（不能开工 + 说清为什么危险）；
- *  2. 「开始整理」不可点；真去点它也必须被拒绝，而且**不许调到 organize**（一个字节都不许写）；
- *  3. 磁盘：源文件夹（= 那个危险输出目录）与其上一级，文件数与目录数一个都没变；
- *  4. 树本身照旧正确（源文件夹分组 + 原样保留的子树 + 分类夹 + 文件名都在），并且不再出现过程说明。
+ * **危险输出方向**（输出目录 = 某个源文件夹本身）会怎样。
+ * 新界面在方向危险时**根本不出方案**（预览卡不亮），所以这条查的是：
+ *  1. 分拣台上写出那句人话警告（不能开工 + 说清为什么危险）；
+ *  2. 「确认分拣」不可点；真去点它也必须被拒绝，而且**不许调到 organize**（一个字节都不许写）；
+ *  3. 画布里没有半成品方案（不亮预览卡、画布是空的）；
+ *  4. 磁盘：源文件夹（= 那个危险输出目录）与其上一级，文件数与目录数一个都没变；
+ *  5. 预览区里也不许出现过程说明。
  * @returns {string[]} 问题清单（空数组 = 没问题）
  */
 async function inspectDangerousDirection(productSource, label, ctx, dangerousOutDir) {
@@ -862,9 +841,7 @@ async function inspectDangerousDirection(productSource, label, ctx, dangerousOut
       return hits;
     }
     pickOutEl.dispatch('click', { preventDefault() {} });
-    await flush();
-    await flush();
-    await flush();
+    for (let i = 0; i < 6; i++) await flush();
 
     // 点预览
     const previewBtn = run.elements.get('preview');
@@ -873,40 +850,50 @@ async function inspectDangerousDirection(productSource, label, ctx, dangerousOut
       return hits;
     }
     previewBtn.dispatch('click', { preventDefault() {} });
-    await flush();
-    await flush();
-    await flush();
+    for (let i = 0; i < 12; i++) await flush();
 
-    const warningText = String((run.elements.get('preview-warning') || {}).textContent || '');
-    const startEl = run.elements.get('start');
-    const startDisabled = (startEl || {}).disabled === true;
-    const treeEl = run.elements.get('preview-tree');
-    const treeText = treeEl ? textOf(treeEl) : '';
+    const warningText = String((run.elements.get('plan-warning') || {}).textContent || '');
+    const noticeText0 = String((run.elements.get('plan-notice') || {}).textContent || '');
+    const combined = `${warningText} ${noticeText0}`;
+    const confirmEl = run.elements.get('plan-confirm');
+    const confirmDisabled = (confirmEl || {}).disabled === true;
+    const planShown = (run.elements.get('plan-card') || {}).hidden === false;
+    const canvasEl = run.elements.get('plan-canvas');
+    const canvasText = canvasEl ? textOf(canvasEl) : '';
 
-    // 1) 危险提醒仍在：预览区里就是那句人话
-    if (!/不能开工/.test(warningText)) {
-      hits.push(`危险方向下预览区没有写出那句警告：「${warningText}」`);
+    // 1) 危险提醒仍在：就是那句人话
+    if (!/不能开工/.test(combined)) {
+      hits.push(`危险方向下没有写出那句警告：「${combined.trim()}」`);
     }
-    if (!/就是源文件夹本身/.test(warningText)) {
-      hits.push(`危险方向下那句警告没说清为什么危险：「${warningText}」`);
+    if (!/就是源文件夹本身/.test(combined)) {
+      hits.push(`危险方向下那句警告没说清为什么危险：「${combined.trim()}」`);
     }
 
-    // 2) 「开始整理」不可点；真点它也必须被拒绝，且不许调 organize
-    if (!startDisabled) hits.push('危险方向下「开始整理」仍然可点（应当是不可点）');
-    if (startEl) {
-      startEl.dispatch('click', { preventDefault() {} });
+    // 2) 「确认分拣」不可点；真点它也必须被拒绝，且不许调 organize
+    if (!confirmDisabled) hits.push('危险方向下「确认分拣」仍然可点（应当是不可点）');
+    if (confirmEl) {
+      confirmEl.dispatch('click', { preventDefault() {} });
       for (let i = 0; i < 20; i++) await flush();
     }
     if (state.organizeCalls.length !== 0) {
       hits.push(`危险方向下竟然调了 organize ${state.organizeCalls.length} 次（一个字节都不许写）`);
     }
-    const noticeText = String((run.elements.get('notice') || {}).textContent || '');
+    const noticeText = String((run.elements.get('plan-notice') || {}).textContent || '');
     const summaryText = String((run.elements.get('summary') || {}).textContent || '');
     if (!(/不能开工/.test(noticeText) || /没有开始整理/.test(summaryText))) {
-      hits.push(`危险方向下点了「开始整理」没被拒绝（提示：「${noticeText}」/「${summaryText}」）`);
+      hits.push(`危险方向下点了「确认分拣」没被拒绝（提示：「${noticeText}」/「${summaryText}」）`);
     }
 
-    // 3) 磁盘一个字节都没写
+    // 3) 画布里没有半成品方案
+    if (planShown) hits.push('危险方向下预览卡仍然亮着（不该出半成品方案）');
+    if (canvasText.trim().length > 0) {
+      hits.push(`危险方向下画布里还有东西（不该画半成品方案）：${canvasText.slice(0, 120)}`);
+    }
+    for (const word of NARRATION_WORDS) {
+      if (canvasText.indexOf(word) >= 0) hits.push(`预览区里还留着过程说明「${word}」`);
+    }
+
+    // 4) 磁盘一个字节都没写
     const afterSource = countTree(sourceRoot);
     const afterParent = countTree(parentOfSource);
     if (afterSource.files !== beforeSource.files || afterSource.dirs !== beforeSource.dirs) {
@@ -918,26 +905,6 @@ async function inspectDangerousDirection(productSource, label, ctx, dangerousOut
       hits.push(
         `危险方向下源文件夹的上一级被写了：文件 ${beforeParent.files}->${afterParent.files}，目录 ${beforeParent.dirs}->${afterParent.dirs}`,
       );
-    }
-
-    // 4) 树本身照旧正确（只给树）
-    if (!treeEl) {
-      hits.push('element never looked up: #preview-tree');
-      return hits;
-    }
-    const rootNodes = findByClass(treeEl, 'root');
-    if (rootNodes.length === 0) hits.push('危险方向下预览树里没有源文件夹分组节点（class="root"）');
-    if (findByClass(treeEl, 'keep').length === 0) hits.push('危险方向下预览树里没有「原样保留的子树」（class="keep"）');
-    if (findByClass(treeEl, 'cat').length === 0) hits.push('危险方向下预览树里没有分类夹（class="cat"）');
-    for (const want of ['下载', '照片', '文档', '婚纱']) {
-      if (treeText.indexOf(want) < 0) hits.push(`危险方向下预览树里看不到「${want}」这一层`);
-    }
-    for (const word of NARRATION_WORDS) {
-      if (treeText.indexOf(word) >= 0) hits.push(`预览区里还留着过程说明「${word}」：${treeText.slice(0, 160)}`);
-    }
-    const summaryOfPreview = String((run.elements.get('preview-summary') || {}).textContent || '');
-    if (summaryOfPreview.trim().length > 0) {
-      hits.push(`预览区里还写着说明（preview-summary 不是空的：「${summaryOfPreview.slice(0, 120)}」）`);
     }
 
     return hits;
@@ -1075,7 +1042,7 @@ async function inspectDangerousDirection(productSource, label, ctx, dangerousOut
     });
 
     /* ---------- 五、危险输出方向：危险提醒仍在 + 按钮不可点 + 磁盘一个字节都没写 ---------- */
-    await check('危险输出方向（输出 = 源文件夹本身）：预览里出现那句警告、「开始整理」不可点且点了被拒、磁盘一个字节都没写，树照旧正确', async () => {
+    await check('危险输出方向（输出 = 源文件夹本身）：分拣台上出现那句警告、「确认分拣」不可点且点了被拒、磁盘一个字节都没写、画布里不留半成品', async () => {
       const dangerousOut = ctx.roots[0]; // 危险：输出目录就是夹具里的源文件夹「下载」本身
       const hits = await inspectDangerousDirection(rendererJsProbe, 'current-renderer-danger.js', ctx, dangerousOut);
       ok(hits.length === 0, `危险方向下界面没拦住：${hits.join(' | ')}`);
@@ -1086,71 +1053,60 @@ async function inspectDangerousDirection(productSource, label, ctx, dangerousOut
     });
 
     /* ---------- 六、探针必须是活的 ---------- */
-    await check('探针有效性自检：拿「预览区里还带着过程说明」的产物喂进去必须判失败，真产物必须通过', async () => {
-      // (1) 旧语义产物：子文件夹里的文件也被塞进分类夹，也没有「原样保留」的分组
-      const legacyHits = await inspectFolderSupport(LEGACY_CLASSIFY_ALL_PRODUCT, 'legacy-classify-all.js', ctx);
-      ok(legacyHits.length > 0, '「按旧语义」的产物被说 OK —— 探针是死的');
-      log(`      旧语义产物被抓到的证据（前 3 条）：${legacyHits.slice(0, 3).join(' | ')}`);
-      // 必须真的抓在「新语义」这一点上，而不是因为没有 pick-folders 按钮之类侥幸判失败
+    await check('探针有效性自检：抽掉「分类层 / 文件 / 放下源文件夹」与「塞回过程说明」的产物必须判失败，真产物必须通过', async () => {
+      // (1) 抽掉分类层：那几层目录必然看不见 —— 必须判失败
+      const CATS_OF = 'const cats = categoriesOf(planGraph);';
+      ok(rendererJs.indexOf(CATS_OF) >= 0, '真产物里找不到「算出分类层」那一步（探针要钉的就是它）');
+      const noCats = rendererJs.split(CATS_OF).join('const cats = [];');
+      ok(noCats !== rendererJs, '没能造出「不画分类层」的产物样本');
+      const noCatHits = await inspectFolderSupport(noCats, 'crippled-no-cats.js', ctx);
+      ok(noCatHits.length > 0, '「不画分类层」的产物被说 OK —— 探针是死的');
       ok(
-        legacyHits.some((h) => /keep|原样保留|说明/.test(h)),
-        `旧语义产物被抓到的理由与新语义无关：${legacyHits.join(' | ')}`,
+        noCatHits.some((h) => /看不到「/.test(h)),
+        `「不画分类层」被抓到的理由与可见的层无关：${noCatHits.join(' | ')}`,
       );
+      log(`      抽掉「分类层」后的证据（前 2 条）：${noCatHits.slice(0, 2).join(' | ')}`);
 
-      // (2) 控制台点名要的诱饵：**树画得跟真产物一样**，只是预览区里还挂着那些过程说明
-      //     （「按原样保留」「沉了 N 层」「这次沉进来的散文件」…）→ 必须判失败
-      const narrationHits = await inspectFolderSupport(NARRATION_ONLY_PRODUCT, 'narration-only.js', ctx);
-      ok(narrationHits.length > 0, '「预览区里还带着过程说明」的产物被说 OK —— 探针是死的');
+      // (2) 抽掉「每个文件都列出来」：文件必然看不见 —— 必须判失败
+      const FILE_LOOP = 'for (const f of planGraph?.files ?? []) {';
+      ok(rendererJs.indexOf(FILE_LOOP) >= 0, '真产物里找不到「每个文件都列出来」那段循环');
+      const noFiles = rendererJs.split(FILE_LOOP).join('for (const f of []) {');
+      ok(noFiles !== rendererJs, '没能造出「不画文件球」的产物样本');
+      const noFilesHits = await inspectFolderSupport(noFiles, 'crippled-no-file-balls.js', ctx);
+      ok(noFilesHits.length > 0, '「不画文件球」的产物被说 OK —— 探针是死的');
       ok(
-        narrationHits.some((h) => /按原样保留|沉了|并进来|说明块|说明/.test(h)),
-        `诱饵被抓到的理由与「过程说明」无关：${narrationHits.join(' | ')}`,
+        noFilesHits.some((h) => /看不到文件/.test(h)),
+        `「不画文件球」被抓到的理由与文件无关：${noFilesHits.join(' | ')}`,
       );
-      // 而且它必须是因为「还留着说明」才被抓，不是因为树画错了（否则只判树的探针也会通过，那这诱饵就白造了）
-      ok(
-        !narrationHits.some((h) => /预览树里没有|看不到/.test(h)),
-        `诱饵被抓到的理由里混着「树画错了」，说明这个诱饵不够严：${narrationHits.join(' | ')}`,
+      log(`      抽掉「文件球」后的证据（前 2 条）：${noFilesHits.slice(0, 2).join(' | ')}`);
+
+      // (3) 把过程说明**塞回真产物**（进画布）—— 必须判失败。
+      //     这条证明「预览区里还留着过程说明」这个探针对**真产物**也是活的，不是只能抓住手写的诱饵。
+      const JSON_LINE = 'el.planJson.textContent = JSON.stringify({';
+      ok(rendererJs.indexOf(JSON_LINE) >= 0, '真产物里找不到画完之后那一步（探针要钉的就是它）');
+      const withNarration = rendererJs.split(JSON_LINE).join(
+        `{ const note = document.createElement("div"); note.className = "source-note"; note.textContent = "这次沉进来的散文件（沉了 2 层）"; el.planCanvas.appendChild(note); } ${JSON_LINE}`,
       );
-      log(`      预览区还带过程说明的产物被抓到（前 3 条）：${narrationHits.slice(0, 3).join(' | ')}`);
-
-      // (3) 把真产物里「原样保留的子树」那一块抽掉（其余照旧）：分组必然缺 —— 必须判失败
-      const KEEP_BLOCK = 'body.appendChild(subFolderBlock(sub, 0));';
-      const noKeepBlock = rendererJs.split(KEEP_BLOCK).join('void 0;');
-      ok(noKeepBlock !== rendererJs, '没能造出「不画原样保留子树」的产物样本');
-      const noKeepHits = await inspectFolderSupport(noKeepBlock, 'crippled-no-keep-block.js', ctx);
-      ok(noKeepHits.length > 0, '「不画原样保留子树」的产物被说 OK —— 探针是死的');
-      log(`      抽掉「原样保留子树」后的证据（前 3 条）：${noKeepHits.slice(0, 3).join(' | ')}`);
-
-      // (4) 把那句过程说明**塞回真产物**（其余照旧）：必须判失败 ——
-      //     这条证明「预览区里还留着过程说明」这个探针对**真产物**也是活的，不是只能抓住手写的诱饵
-      //     （编译产物里 `for (const f of …)` 与它那句 body.appendChild(fileLine(f)); 是分两行的，
-      //      所以钉的是那一行调用本身；它在「分类夹」与「原样保留的子树」两处各出现一次，两处都塞。）
-      const FILE_LINE = 'body.appendChild(fileLine(f));';
-      ok(rendererJs.indexOf(FILE_LINE) >= 0, '真产物里找不到画文件那一行（探针要钉的就是它）');
-      const withNarration = rendererJs
-        .split(FILE_LINE)
-        .join(
-          `${FILE_LINE} { const note = document.createElement("div"); note.className = "source-note"; note.textContent = "这次沉进来的散文件（沉了 2 层）"; body.appendChild(note); }`,
-        );
       ok(withNarration !== rendererJs, '没能造出「往真产物里塞回过程说明」的产物样本');
       const withNarrationHits = await inspectFolderSupport(withNarration, 'live-with-narration.js', ctx);
       ok(
-        withNarrationHits.some((h) => /沉了|并进来|说明块|说明/.test(h)),
+        withNarrationHits.some((h) => /沉了|并进来|过程说明/.test(h)),
         `往真产物里塞回过程说明没被抓到：${withNarrationHits.join(' | ') || '（竟然全过）'}`,
       );
-      log(`      往真产物里塞回过程说明后的证据（前 3 条）：${withNarrationHits.slice(0, 3).join(' | ')}`);
+      log(`      往真产物里塞回过程说明后的证据（前 2 条）：${withNarrationHits.slice(0, 2).join(' | ')}`);
 
-      // (5) 把真产物里「把源文件夹传给预览」这一步抽掉：分组必然画不出来 → 必须判失败
+      // (4) 把真产物里「把源文件夹传给预览」这一步抽掉：分组必然画不出来 → 必须判失败
       const noRootsToPreview = withoutSetSourceRoots(rendererJs);
       ok(noRootsToPreview !== rendererJs, '没能造出「不把源文件夹传给预览」的产物样本');
       const noRootsHits = await inspectFolderSupport(noRootsToPreview, 'crippled-no-setroots.js', ctx);
       ok(noRootsHits.length > 0, '「不把源文件夹传给预览」的产物被说 OK —— 探针是死的');
-      log(`      抽掉「放下源文件夹」后的证据（前 3 条）：${noRootsHits.slice(0, 3).join(' | ')}`);
+      log(`      抽掉「放下源文件夹」后的证据（前 2 条）：${noRootsHits.slice(0, 2).join(' | ')}`);
 
-      // (6) 真产物必须通过（这一遍是单独一遍，不复用上面的结果）
+      // (5) 真产物必须通过（这一遍是单独一遍，不复用上面的结果）
       const liveHits = await inspectFolderSupport(rendererJsProbe, 'current-renderer-folders.js', ctx);
       ok(liveHits.length === 0, `真产物被判不合格（探针误报）：${liveHits.join(' | ')}`);
       log(
-        '      探针：旧语义产物判失败、带过程说明的产物判失败、塞回过程说明判失败、抽掉原样保留判失败、抽掉源文件夹判失败、真产物判通过',
+        '      探针：抽掉分类层判失败、抽掉文件判失败、塞回过程说明判失败、抽掉放下源文件夹判失败、真产物判通过',
       );
     });
   } catch (err) {

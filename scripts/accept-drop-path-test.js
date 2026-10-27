@@ -223,7 +223,13 @@ async function runAsBrowserScript(code, fileLabel, organizerStub) {
   global.document = dom.documentStub;
   try {
     const mod = new vm.SourceTextModule(code, { identifier: fileLabel });
-    await mod.link(() => {
+    await mod.link((specifier) => {
+      // 允许界面引用自己的纯数据模块（关系链球模型）；其它任何 import 一律不许
+      if (specifier === './planGraph.js') {
+        const dir = process.env.DSH_ACCEPT_OUT || path.join(__dirname, '..', 'out');
+        const target = path.join(dir, 'renderer', specifier);
+        return new vm.SourceTextModule(fs.readFileSync(target, 'utf8'), { identifier: target });
+      }
       throw new Error(`${fileLabel} must not import anything at load time`);
     });
     await mod.evaluate();
@@ -583,6 +589,13 @@ function makeElement(id) {
     addEventListener(type, handler) {
       if (!this.listeners.has(type)) this.listeners.set(type, []);
       this.listeners.get(type).push(handler);
+    },
+    setAttribute(name, value) {
+      if (!this.attrs) this.attrs = new Map();
+      this.attrs.set(name, String(value));
+    },
+    getAttribute(name) {
+      return this.attrs && this.attrs.has(name) ? this.attrs.get(name) : null;
     },
     removeEventListener(type, handler) {
       const list = this.listeners.get(type) || [];

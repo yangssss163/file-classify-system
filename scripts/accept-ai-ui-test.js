@@ -2,20 +2,19 @@
  * 验收第 13 条：**AI 界面壳**（界面接线，不依赖真窗口）。
  * 标准由控制台写死，工作台只执行，不放宽。
  *
- * 做法与第 5/7/9/11 条同一套：**把编译产物当脚本在窗口式桩里真执行**
- * （真 ES module 作用域 vm.SourceTextModule，绝不退化成字符串匹配），
- * 并且真造临时目录与文件，落盘效果逐条核对。
- *
- * 断言清单（缺一不通过）：
+ * 这一条跟着界面改过一版：AI 现在是**一等公民**（分拣台上一个按钮就能用），
+ * 不再是「先按规则分、不满意再撤销、再换 AI」那套。所以判据换成：
  *   1. 界面上有常显的「AI 分类：未配置」状态（不用点按钮就能看出现在只有规则分类可用）；
- *   2. 桩里让「上一次整理可撤销」：点「换一种分法：AI 分类」→
- *      **先撤销、后 AI**（调用序列里「撤销」在「AI 分类」之前）；
- *      撤销后 AI 返回「未配置」→ 界面显示那句人话（同时含「已撤销」与「AI 分类还没配置」两层信息）；
- *      **输出目录里那份被真的撤掉了**（真造临时目录与文件）、**源文件一个没动**（内容也一致）；
- *   3. 再点一次（已撤销状态）→ 只给提示、**不删任何东西**、AI 接口**不再被调用**（真查磁盘：输出里那份回不来、也没多东西）；
- *   4. 让撤销接口**返回失败**（有文件删不掉）→ 断言**没有**继续调用 AI 接口，并且界面如实显示撤销报告；
- *   5. 探针有效性自检：拿内存里现造的「点按钮先调 AI、后撤销」的产物喂给第 2 条那套断言，**必须判失败**；
- *      真产物用同一套断言必须通过。
+ *      启动时真的查过一次状态；界面里只有一处 AI 调用（没有第二套实现）；
+ *   2. 点「AI 分拣」（AI 未配置）：**不撤销、不复制、不删任何东西**，直接调 AI；
+ *      界面说清「AI 分类还没配置」并给出退路（可以点「规则分拣」）；
+ *      AI 那一调必须把源文件夹一起带上（AI 要在「原文件夹已有的目录结构」上分类）；
+ *      一个字节都没写：输出目录、源目录前后一致；而且**没有亮出预览卡**；
+ *   3. AI 分好之后只出方案（关系链球），**还没落盘**：输出目录一个字节都没写、源文件一个没动；
+ *      点「取消本次分拣」也不写，界面说清「已取消」；
+ *   4. 点「确认分拣」才落盘：按 AI 给的分类落地（<输出>\<源文件夹>\分类\文件），源文件一个没少；
+ *   5. 探针有效性自检：两个内存里现造的坏样本（「AI 没配置却当成功画出了方案」
+ *      「一分拣就偷偷把文件复制了」）喂给第 2/3 条那套断言**必须判失败**，真产物必须通过。
  *
  * 全部通过：stdout 打印「AI界面壳OK」并 exit 0；
  * 任何一条不过：stdout 打印「验收失败:AI界面壳」并 exit 1。
@@ -151,6 +150,7 @@ function makeElement(id) {
     value: '',
     type: '',
     checked: false,
+    placeholder: '',
     style: {},
     children: [],
     listeners: new Map(),
@@ -175,6 +175,7 @@ function makeElement(id) {
     },
     setAttribute(name, value) {
       this.attrs.set(name, String(value));
+      if (String(name) === 'class') this.className = String(value);
     },
     getAttribute(name) {
       return this.attrs.has(name) ? this.attrs.get(name) : null;
@@ -214,6 +215,12 @@ function makeElement(id) {
     set(v) {
       _text = v === undefined || v === null ? '' : String(v);
       if (_text === '') el.children.length = 0;
+    },
+    enumerable: true,
+  });
+  Object.defineProperty(el, 'firstElementChild', {
+    get() {
+      return el.children.length > 0 ? el.children[0] : null;
     },
     enumerable: true,
   });
@@ -275,7 +282,13 @@ async function runInWindowStub(source, label, organizer, confirmAnswer) {
 
   try {
     const mod = new vm.SourceTextModule(source, { identifier: label });
-    await mod.link(() => {
+    await mod.link((specifier) => {
+      // 允许界面引用自己的纯数据模块（关系链球模型）；其它任何 import 一律不许
+      if (specifier === './planGraph.js') {
+        const dir = process.env.DSH_ACCEPT_OUT || path.join(__dirname, '..', 'out');
+        const target = path.join(dir, 'renderer', specifier);
+        return new vm.SourceTextModule(fs.readFileSync(target, 'utf8'), { identifier: target });
+      }
       throw new Error(`${label} must not import anything at load time`);
     });
     await mod.evaluate();
@@ -288,9 +301,9 @@ async function runInWindowStub(source, label, organizer, confirmAnswer) {
 }
 
 /* ------------------------------------------------------------------ *
- * 假 window.organizer：撤销用**真的 core/runRecord** 干活（所以磁盘上的效果是真的），
- * AI 那两件事按场景给答案（这一片 AI 不许联网，所以桩里也只能「回话」）。
- * 调用序列记在 `state.sequence` 里 —— 「先撤销、后 AI」就是靠它判的。
+ * 假 window.organizer：预览/整理用**真的 core** 干活（磁盘上的效果是真的），
+ * AI 那两件事按场景给答案（这一片界面只回话，不联网络）。
+ * 调用序列记在 `state.sequence` 里 —— 「分拣时不撤销、不写盘」就是靠它判的。
  * ------------------------------------------------------------------ */
 
 function makeOrganizer(opts) {
@@ -302,25 +315,19 @@ function makeOrganizer(opts) {
     aiStatusCalls: 0,
     lastRunCalls: 0,
     organizeCalls: 0,
+    organizeAssignments: null,
     pickOutputCalls: 0,
     pendingRoots: [],
     aiResult: o.aiResult || {
       ok: false,
       reason: 'not-configured',
-      message: 'AI 分类还没配置，先按规则分类；到设置里填接口与密钥后可用（下一版做）',
+      message: 'AI 分类还没配置，先按规则分类；到设置里填接口与密钥后可用',
     },
     aiStatus: o.aiStatus || { configured: false, label: 'AI 分类：未配置', message: 'AI 分类还没配置，先按规则分类。' },
-    undoOutcome: o.undoOutcome || null,
-    lastRunOverride: o.lastRun || null,
   };
   const knownFiles = new Set((o.files || []).map((f) => String(f)));
   const knownRoots = (o.roots || []).map((r) => String(r));
   const lower = (s) => String(s).toLowerCase();
-
-  const realLastRun = () =>
-    o.recordPath && fs.existsSync(o.recordPath)
-      ? core.summarizeLastRun(core.loadRunRecord(o.recordPath))
-      : core.summarizeLastRun(null);
 
   const api = {
     pathForFile: (file) => (file && file.__path) || null,
@@ -346,13 +353,15 @@ function makeOrganizer(opts) {
     },
     preview: async (fileList, outputDir, rules) =>
       core.buildPreviewTree({ files: fileList, roots: state.pendingRoots.slice(), outputDir, rules: rules || null }),
-    organize: async (fileList, outputDir, rules, rootList) => {
+    organize: async (fileList, outputDir, rules, rootList, assignments) => {
       state.organizeCalls++;
+      state.organizeAssignments = assignments ? Array.from(assignments) : null;
       return core.copyFiles({
         files: fileList,
         roots: rootList,
         outputDir,
         rules: rules || null,
+        assignments: assignments || null,
         recordPath: o.recordPath || null,
       });
     },
@@ -366,36 +375,37 @@ function makeOrganizer(opts) {
         files: (input && input.files) || [],
         outputDir: (input && input.outputDir) || '',
       }),
-    /** 上一次整理的摘要：默认按真记录算，场景可以覆盖 */
     lastRun: async () => {
       state.lastRunCalls++;
-      if (state.lastRunOverride) return state.lastRunOverride;
-      return realLastRun();
+      return o.recordPath && fs.existsSync(o.recordPath)
+        ? core.summarizeLastRun(core.loadRunRecord(o.recordPath))
+        : core.summarizeLastRun(null);
     },
-    /** 撤销：默认真调 core.undoLastRun（所以磁盘效果是真的）；场景可以给一个「失败」的报告 */
     undoLastRun: async () => {
       state.undoCalls++;
       state.sequence.push('undo');
-      if (state.undoOutcome) return state.undoOutcome;
       const recordPath = o.recordPath || null;
-      if (!recordPath) {
-        return { result: core.undoLastRun(''), summary: realLastRun() };
-      }
-      const result = core.undoLastRun(recordPath);
-      return { result, summary: realLastRun() };
+      const result = core.undoLastRun(recordPath || '');
+      return { result, summary: core.summarizeLastRun(recordPath ? core.loadRunRecord(recordPath) : null) };
     },
     /** 界面上那行常显状态 */
     aiStatus: async () => {
       state.aiStatusCalls++;
       return state.aiStatus;
     },
-    /** 「换一种分法」的 AI 分类那一调（这一片只回话，不联网络） */
-    aiClassify: async (filePaths, outputDir) => {
-      state.aiCalls.push({ filePaths: Array.from(filePaths || []), outputDir: outputDir ?? null });
+    /** 「AI 分拣」那一调（这一片只回话，不联网络） */
+    aiClassify: async (filePaths, outputDir, roots) => {
+      state.aiCalls.push({
+        filePaths: Array.from(filePaths || []),
+        outputDir: outputDir ?? null,
+        // 第三个参数是源文件夹：核心据它读出「原文件夹已有的分类目录」，界面必须把它带上
+        roots: roots ? Array.from(roots) : null,
+      });
       state.sequence.push('ai');
       return state.aiResult;
     },
     onProgress: () => {},
+    onAiProgress: () => {},
   };
   return { api, state };
 }
@@ -409,8 +419,7 @@ function dropFolder(run, folderPath) {
 }
 
 /* ------------------------------------------------------------------ *
- * 场景跑法：造源文件夹 → 拖入 → 选输出 → 点「开始整理」（真复制、真落记录）
- * → 点「换一种分法：AI 分类」（这一步是这一条要验的）。
+ * 场景跑法：造源文件夹 → 拖入 → 选输出 → 点分拣台上那个按钮。
  * ------------------------------------------------------------------ */
 
 async function startScenario(ctx, productSource, label, scenario) {
@@ -422,11 +431,9 @@ async function startScenario(ctx, productSource, label, scenario) {
     recordPath: ctx.recordPath,
     aiResult: s.aiResult,
     aiStatus: s.aiStatus,
-    undoOutcome: s.undoOutcome,
-    lastRun: s.lastRun,
   });
   const run = await runInWindowStub(productSource, label, api, s.confirm !== false);
-  const out = { run, state, error: run.error, problems: [], aiNotice: [], aiStatus: [] };
+  const out = { run, state, error: run.error, problems: [] };
   // 注意：桩**不能**在这里 restore —— 点按钮之后界面还要继续跑（点完才看得到结果）。
   // 由调用方在「所有 await 都结束」之后再调 seen.close()。
   out.close = () => run.restore();
@@ -435,18 +442,14 @@ async function startScenario(ctx, productSource, label, scenario) {
     return out;
   }
   try {
-    out.aiStatus.push(String((run.elements.get('ai-status') || {}).textContent || ''));
-    if (s.clickStart !== false) {
+    out.aiStatusText = String((run.elements.get('ai-status') || {}).textContent || '');
+    if (s.dropOnly === true) {
       dropFolder(run, ctx.root);
-      await settle(20);
+      for (let i = 0; i < 20; i++) await flush();
       const pickOut = run.elements.get('pick-out');
       if (!pickOut) out.problems.push('element never looked up: #pick-out');
       else pickOut.dispatch('click', { preventDefault() {} });
-      await settle(20);
-      const startBtn = run.elements.get('start');
-      if (!startBtn) out.problems.push('element never looked up: #start');
-      else startBtn.dispatch('click', { preventDefault() {} });
-      await settle(60);
+      for (let i = 0; i < 20; i++) await flush();
     }
     return out;
   } catch (err) {
@@ -455,93 +458,138 @@ async function startScenario(ctx, productSource, label, scenario) {
   }
 }
 
-/** 点一次「换一种分法：AI 分类」，并把点完的界面文字收下来。 */
-async function clickAiReclassify(seen) {
-  const btn = seen.run.elements.get('ai-reclassify');
+/** 收下一次点击之后界面上那几句话。 */
+function readUi(seen) {
+  const e = seen.run.elements;
+  const txt = (id) => String((e.get(id) || {}).textContent || '');
+  return {
+    status: txt('ai-status'),
+    planNotice: txt('plan-notice'),
+    planSummary: txt('plan-summary'),
+    notice: txt('notice'),
+    summary: txt('summary'),
+    canvas: e.get('plan-canvas') ? textOf(e.get('plan-canvas')) : '',
+    planShown: (e.get('plan-card') || {}).hidden === false,
+    confirmDisabled: (e.get('plan-confirm') || {}).disabled === true,
+  };
+}
+
+/** 点一次分拣台上那个按钮（默认「AI 分拣」，也可以点「规则分拣」）。 */
+async function clickSort(seen, which = 'sort-ai') {
+  const btn = seen.run.elements.get(which);
   if (!btn) {
-    seen.problems.push('element never looked up: #ai-reclassify');
+    seen.problems.push(`element never looked up: #${which}`);
     return seen;
   }
   btn.dispatch('click', { preventDefault() {} });
   await settle(60);
-  seen.aiNotice.push(String((seen.run.elements.get('ai-notice') || {}).textContent || ''));
-  seen.aiStatus.push(String((seen.run.elements.get('ai-status') || {}).textContent || ''));
-  seen.undoReportText = seen.run.elements.get('undo-report') ? textOf(seen.run.elements.get('undo-report')) : '';
-  seen.undoHintText = String((seen.run.elements.get('undo-hint') || {}).textContent || '');
-  seen.aiDisabled = btn.disabled === true;
-  return seen;
-}
-
-/** 「造场 → 点按钮 → 收结果」的完整一趟（桩由调用方在断言之后 close）。 */
-async function runAiClickScenario(ctx, renderer, label, scenario) {
-  const seen = await startScenario(ctx, renderer, label, scenario);
-  const copied = listFiles(ctx.outputDir);
-  seen.__before = {
-    copiedFile:
-      copied.length > 0 ? path.join(ctx.outputDir, ...copied[0].split(path.sep)) : path.join(ctx.outputDir, '输出里没有这份'),
-    srcFile: ctx.srcFile,
-    srcContent: readText(ctx.srcFile),
-    srcTree: countTree(ctx.src),
-  };
-  await clickAiReclassify(seen);
+  seen.ui = readUi(seen);
   return seen;
 }
 
 /* ------------------------------------------------------------------ *
- * 造「先调 AI、后撤销」的产物：把 AI 那一块**整块搬到撤销之前**（只用内存字符串替换，其它照旧）。
- * 用来反证这一条的探针是活的。
+ * 判据（真产物与坏样本共用同一套）
  * ------------------------------------------------------------------ */
-function aiBeforeUndo(source) {
-  // 把两个接口调用的**先后**换过来（只换这一句，别的一律照旧）：
-  // 换完之后，点按钮时「AI 分类」先被调到、并且它成功后直接结束，撤销那一块成了够不到的代码。
-  const undoCall = 'outcome = (await api.undoLastRun());';
-  const aiCall = 'ai = (await api.aiClassify(collectFiles(), outputDir));';
-  if (!source.includes(undoCall) || !source.includes(aiCall)) return source;
-  const TOKEN_A = '__PROBE_UNDO_CALL__';
-  const TOKEN_B = '__PROBE_AI_CALL__';
-  let out = source.replace(undoCall, TOKEN_A).replace(aiCall, TOKEN_B);
-  out = out.replace(
-    TOKEN_A,
-    // 撤销那一句被搬到 AI 的位置上：并明写「先调 AI 就直接结束」这道闸
-    `${aiCall}\n        if (ai?.ok !== true) { return; }`,
+
+/** 第 2 条：AI 未配置时点「AI 分拣」——直接调 AI、不撤销、不写盘、不出方案、说清退路。 */
+function assertAiNotConfigured(seen, ctx, label) {
+  ok(seen.problems.length === 0, `${label}：${seen.problems.join(' | ')}`);
+  eq(seen.state.aiCalls.length, 1, `${label}：「AI 分拣」必须真的把 AI 调起来（实际 ${seen.state.aiCalls.length} 次）`);
+  eq(seen.state.undoCalls, 0, `${label}：这条路不许去调撤销（现在是直接就能用 AI）`);
+  eq(seen.state.organizeCalls, 0, `${label}：出方案这一步绝不许复制文件`);
+  eq(seen.state.sequence.join('→'), 'ai', `${label}：序列里只该有 AI 那一调：实际 ${seen.state.sequence.join('→')}`);
+
+  const ui = seen.ui || readUi(seen);
+  ok(/AI 分类还没配置/.test(ui.planNotice), `${label}：界面要说清「AI 分类还没配置」：「${ui.planNotice}」`);
+  ok(
+    /规则分拣|规则分类|回落|兜底/.test(ui.planNotice),
+    `${label}：界面要给退路（可以先用规则分拣）：「${ui.planNotice}」`,
   );
-  out = out.replace(TOKEN_B, undoCall);
-  return out;
+  ok(ui.planShown !== true, `${label}：AI 没配好时不该亮出预览卡（那样等于假装成功了）`);
+  ok(
+    !/AI 分好了/.test(ui.planNotice),
+    `${label}：AI 没配好时不许说「AI 分好了」：「${ui.planNotice}」`,
+  );
+
+  // 源文件夹必须一起带下去（AI 要在「原文件夹已有的目录结构」上分类，不是凭空另起一套）
+  eq(
+    JSON.stringify(seen.state.aiCalls[0].roots || []),
+    JSON.stringify([ctx.root]),
+    `${label}：AI 那一调必须把源文件夹带上（实际 ${JSON.stringify(seen.state.aiCalls[0].roots)}）`,
+  );
+  // 一个字节都没写
+  eq(listFiles(ctx.outputDir).length, 0, `${label}：输出目录里不该多出任何东西`);
+  eq(
+    JSON.stringify(countTree(ctx.src)),
+    JSON.stringify(seen.srcTreeBefore),
+    `${label}：源目录被动过（这一步连读都不该改）`,
+  );
+  return true;
+}
+
+/** 第 3 条：AI 分好之后只出方案、不落盘；点「取消本次分拣」也不写。 */
+function assertPlanOnlyNoDisk(seen, ctx, label) {
+  ok(seen.problems.length === 0, `${label}：${seen.problems.join(' | ')}`);
+  eq(seen.state.aiCalls.length, 1, `${label}：AI 接口应当正好被调到 1 次，实际 ${seen.state.aiCalls.length} 次`);
+  eq(seen.state.undoCalls, 0, `${label}：不撤销`);
+  eq(seen.state.organizeCalls, 0, `${label}：没点确认之前绝不许落盘`);
+
+  const ui = seen.ui || readUi(seen);
+  ok(ui.planShown === true, `${label}：AI 分好之后应当亮出预览卡（关系链球）`);
+  ok(/AI 分好了/.test(ui.planNotice), `${label}：界面要把 AI 那句话原样说出来：「${ui.planNotice}」`);
+  ok(/确认之前不会动任何文件|不会动任何文件/.test(ui.planNotice), `${label}：要说清「确认之前不会动任何文件」：「${ui.planNotice}」`);
+  ok(/AI/.test(ui.planSummary), `${label}：预览卡标题要写明这是 AI 分法：「${ui.planSummary}」`);
+  for (const cat of ['风景照', '合同']) {
+    ok(ui.canvas.includes(cat), `${label}：预览里没有 AI 给的分类「${cat}」：${ui.canvas.slice(0, 160)}`);
+  }
+
+  // 磁盘：一个字节都没写
+  eq(listFiles(ctx.outputDir).length, 0, `${label}：还没点确认，输出目录里不该有文件`);
+  eq(countTree(ctx.src).files, seen.srcTreeBefore.files, `${label}：源目录的文件数变了`);
+  eq(JSON.stringify(countTree(ctx.src)), JSON.stringify(seen.srcTreeBefore), `${label}：源目录被动过`);
+
+  // 点「取消本次分拣」：一个字节都不写，界面说清「已取消」
+  const cancel = seen.run.elements.get('plan-cancel');
+  ok(!!cancel, `${label}：找不到「取消本次分拣」按钮`);
+  cancel.dispatch('click', { preventDefault() {} });
+  return (async () => {
+    await settle(30);
+    const after = readUi(seen);
+    ok(/已取消本次分拣/.test(after.planNotice), `${label}：取消之后要说清「已取消本次分拣」：「${after.planNotice}」`);
+    eq(listFiles(ctx.outputDir).length, 0, `${label}：取消之后输出目录里不该有文件`);
+    eq(seen.state.organizeCalls, 0, `${label}：取消之后也不许落盘`);
+    eq(JSON.stringify(countTree(ctx.src)), JSON.stringify(seen.srcTreeBefore), `${label}：取消之后源目录被动过`);
+    return true;
+  })();
+}
+
+/* ------------------------------------------------------------------ *
+ * 内存里现造的坏样本（其它一律照旧，只坏一处），用来反证探针是活的
+ * ------------------------------------------------------------------ */
+
+/** 坏样本一：AI 没配好也当成功，照样把方案画出来。 */
+function ignoreAiFailure(source) {
+  const anchor = 'if (!ai || ai.ok !== true) {';
+  if (!source.includes(anchor)) return source;
+  return source.replace(anchor, 'if (!ai) {');
+}
+
+/** 坏样本二：刚出方案就偷偷把文件复制了（等于「预览」这一步就落盘）。 */
+function copiesAtPlanTime(source) {
+  const anchor = 'planGraph = buildPlanGraph(base);';
+  if (!source.includes(anchor)) return source;
+  return source.replace(
+    anchor,
+    `${anchor} void api.organize(files, outputDir, rulesForUse(), null, assignmentsOf(planGraph));`,
+  );
 }
 
 /* ------------------------------------------------------------------ *
  * 主流程
  * ------------------------------------------------------------------ */
 
-/** 第 2 条那套断言：「先撤销、后 AI 」+ 人话 + 磁盘效果。真产物与「顺序反了」的产物都喂给它。 */
-function assertUndoBeforeAi(seen, ctx, label) {
-  const before = seen.__before;
-  ok(seen.problems.length === 0, `${label}：${seen.problems.join(' | ')}`);
-  ok(seen.state.undoCalls === 1, `${label}：撤销接口应当正好被调到 1 次，实际 ${seen.state.undoCalls} 次`);
-  ok(seen.state.aiCalls.length === 1, `${label}：AI 接口应当正好被调到 1 次，实际 ${seen.state.aiCalls.length} 次`);
-  const seq = seen.state.sequence.join('→');
-  const iUndo = seen.state.sequence.indexOf('undo');
-  const iAi = seen.state.sequence.indexOf('ai');
-  ok(iUndo >= 0 && iAi >= 0, `${label}：调用序列里缺一环（${seq}）`);
-  ok(iUndo < iAi, `${label}：顺序错了 —— 必须先「撤销」后「AI 分类」，实际序列是 ${seq}`);
-  eq(seen.state.sequence[0], 'undo', `${label}：第一个动作必须是撤销（实际序列 ${seq}）`);
-
-  const notice = seen.aiNotice[seen.aiNotice.length - 1] || '';
-  ok(/本次已撤销/.test(notice), `${label}：界面要说清「本次已撤销」：「${notice}」`);
-  ok(/删掉\s*\d+\s*个文件/.test(notice), `${label}：界面要说清删掉了几个：「${notice}」`);
-  ok(/AI 分类还没配置/.test(notice), `${label}：界面要说清「AI 分类还没配置」：「${notice}」`);
-
-  ok(!fs.existsSync(before.copiedFile), `${label}：输出目录里那份没被撤掉（${before.copiedFile} 还在）`);
-  eq(listFiles(ctx.outputDir).length, 0, `${label}：输出目录里应当一份都不剩`);
-  ok(fs.existsSync(before.srcFile), `${label}：源文件不见了（撤销的红线：原文件不许动）`);
-  eq(readText(before.srcFile), before.srcContent, `${label}：源文件内容被改了`);
-  eq(countTree(ctx.src).files, before.srcTree.files, `${label}：源目录的文件数变了`);
-  eq(JSON.stringify(countTree(ctx.src)), JSON.stringify(before.srcTree), `${label}：源目录被动过`);
-  return true;
-}
-
 async function main() {
-  console.log('=== accept-ai-ui-test: 「换一种分法：AI 分类」的界面接线（先撤销、后 AI） ===');
+  console.log('=== accept-ai-ui-test: 分拣台「AI 分拣」一键到底的界面接线 ===');
   console.log(`project root: ${projectRoot}`);
   console.log(`core: ${path.join(OUT, 'core', 'index.js')}`);
 
@@ -569,10 +617,10 @@ async function main() {
   const html = readText(HTML);
 
   try {
-    /* ================= 一：常显状态 + HTML 接线 ================= */
-    await check('界面上有常显的「AI 分类：未配置」：按钮旁那行状态一打开就有，且界面里没有第二处 AI 实现', async () => {
-      ok(/id\s*=\s*["']ai-reclassify["']/.test(html), 'index.html 里没有「换一种分法：AI 分类」那个按钮');
-      ok(/换一种分法：AI 分类/.test(html), 'index.html 里按钮的文字不对（必须是「换一种分法：AI 分类」）');
+    /* ================= 一：常显状态 + 接线 ================= */
+    await check('界面上有常显的「AI 分类：未配置」：分拣台按钮旁一打开就有，且界面里只有一处 AI 调用', async () => {
+      ok(/id\s*=\s*["']sort-ai["']/.test(html), 'index.html 里没有「AI 分拣」那个按钮（#sort-ai）');
+      ok(/id\s*=\s*["']sort-rules["']/.test(html), 'index.html 里没有「规则分拣」那个按钮（#sort-rules）');
       ok(/id\s*=\s*["']ai-status["']/.test(html), 'index.html 里没有常显状态那行（#ai-status）');
       ok(/AI 分类：未配置/.test(html), 'index.html 里没有「AI 分类：未配置」这句常显状态');
       ok(/\.aiClassify\s*\(/.test(rendererTs), 'renderer.ts 里没有调 aiClassify（按钮没接线）');
@@ -580,174 +628,188 @@ async function main() {
       ok(/\.aiClassify\s*\(/.test(rendererJs), '编译产物里没有调 aiClassify');
       ok(/ai:classify/.test(readText(PRELOAD_JS)), 'preload 产物里没有 ai:classify 这条通道');
       ok(/ai:classify/.test(readText(MAIN_JS)), '主进程产物里没有 ai:classify 这条门');
+      // 没有第二处 AI 实现：界面里调 aiClassify 的地方只该有一处（就是「AI 分拣」那条路）
+      const callsInTs = (rendererTs.match(/\.aiClassify\s*\(/g) || []).length;
+      eq(callsInTs, 1, `renderer.ts 里调 aiClassify 的地方该只有一处（实际 ${callsInTs} 处）`);
 
       // 真跑一遍界面脚本，看那行状态是「跑出来的」而不是只写在 HTML 里
-      const ctx = makeCtx(path.join(tmpRoot, '常显状态'), '常显状态');
-      const seen = await startScenario(ctx, rendererJs, 'ui-ai-status.js', {});
+      const ctx = makeCtx(tmpRoot, '常显状态');
+      const seen = await startScenario(ctx, rendererJs, 'ui-ai-status.js', { dropOnly: false });
+      seen.close();
       ok(seen.problems.length === 0, seen.problems.join(' | '));
       ok(seen.state.aiStatusCalls >= 1, `界面启动时应当查一次 AI 状态（实际查了 ${seen.state.aiStatusCalls} 次）`);
-      const status = seen.aiStatus[0] || '';
-      eq(status, 'AI 分类：未配置', '那行常显状态必须显示「AI 分类：未配置」');
-      console.log(`      常显状态：「${status}」（启动时查了 ${seen.state.aiStatusCalls} 次）`);
+      eq(seen.aiStatusText, 'AI 分类：未配置', '那行常显状态必须显示「AI 分类：未配置」');
+      console.log(`      常显状态：「${seen.aiStatusText}」（启动时查了 ${seen.state.aiStatusCalls} 次）`);
     });
 
-    /* ================= 二：先撤销、后 AI（真产物） ================= */
-    let ctxA = null;
-    let seenA = null;
-    await check('点「换一种分法：AI 分类」：先撤销、后 AI；界面说清「已撤销 N 个 + AI 分类还没配置」；输出里那份真被撤掉、源文件一个没动', async () => {
-      ctxA = makeCtx(path.join(tmpRoot, '先撤销后AI'), '先撤销后AI');
-      seenA = await startScenario(ctxA, rendererJs, 'ui-ai-live.js', {});
-      try {
-        ok(seenA.problems.length === 0, seenA.problems.join(' | '));
-        ok(seenA.state.organizeCalls === 1, '整理那一步没跑成（这一条没法验）');
-        // 前置：整理之后输出里确实有那份、记录也可撤销（点按钮之前先钉死这个前提）
-        const copiedBefore = listFiles(ctxA.outputDir);
-        ok(copiedBefore.length > 0, '整理之后输出目录里应当有文件（这一条没法验）');
-        const summary = core.summarizeLastRun(core.loadRunRecord(ctxA.recordPath));
-        eq(summary.available, true, '前置不成立：这份记录应当是可撤销的（要先真整理过一次）');
-        console.log(`      前置：输出里 ${copiedBefore.length} 份（${copiedBefore[0]}），记录说可撤销 ${summary.fileCount} 个`);
+    /* ================= 二：AI 未配置 → 直接说清 + 退路 ================= */
+    await check(
+      '点「AI 分拣」（AI 未配置）：不撤销、不复制、不删任何东西，直接调 AI，并说清「AI 分类还没配置」+ 退路',
+      async () => {
+        const ctx = makeCtx(tmpRoot, 'AI未配置');
+        const seen = await startScenario(ctx, rendererJs, 'ui-ai-unconfigured.js', { dropOnly: true });
+        try {
+          seen.srcTreeBefore = countTree(ctx.src);
+          await clickSort(seen, 'sort-ai');
+          assertAiNotConfigured(seen, ctx, '真产物');
+          console.log(`      界面「${seen.ui.planNotice}」；撤销 ${seen.state.undoCalls} 次 / AI ${seen.state.aiCalls.length} 次`);
+        } finally {
+          seen.close();
+        }
+      },
+    );
 
-        seenA.__before = {
-          copiedFile: path.join(ctxA.outputDir, ...copiedBefore[0].split(path.sep)),
-          srcFile: ctxA.srcFile,
-          srcContent: readText(ctxA.srcFile),
-          srcTree: countTree(ctxA.src),
-        };
-        await clickAiReclassify(seenA);
-        assertUndoBeforeAi(seenA, ctxA, '真产物');
-        ok(seenA.state.aiCalls[0].filePaths.length > 0, 'AI 那一调应当把文件清单一起带上（将来的接口要用）');
-        console.log(`      序列：${seenA.state.sequence.join('→')}；界面：「${seenA.aiNotice[seenA.aiNotice.length - 1]}」`);
-      } finally {
-        seenA.close();
-      }
-    });
-
-    /* ================= 三：再点一次（已撤销状态） ================= */
-    await check('再点一次（已经撤销过）：只给提示、不删任何东西、AI 接口不再被调用', async () => {
-      ok(seenA !== null, '上一条没跑成，这一条没法验');
-      const outputBefore = listFiles(ctxA.outputDir);
-      const srcTreeBefore = countTree(ctxA.src);
-      const aiCallsBefore = seenA.state.aiCalls.length;
-
-      // 桩里的记录此时已经被标成「已撤销」：界面必须自己看出来「没有可撤销的整理」
-      const summary = core.summarizeLastRun(core.loadRunRecord(ctxA.recordPath));
-      eq(summary.available, false, '前置不成立：这份记录此时应当已经不可撤销');
-      ok(/已经撤销过/.test(summary.reason), `摘要应当说明「已经撤销过」，实际「${summary.reason}」`);
-
-      const seen = await startScenario(
-        { ...ctxA, recordPath: ctxA.recordPath },
-        rendererJs,
-        'ui-ai-again.js',
-        { clickStart: false },
-      );
-      try {
-        ok(seen.problems.length === 0, seen.problems.join(' | '));
-        await clickAiReclassify(seen);
-        const notice = seen.aiNotice[seen.aiNotice.length - 1] || '';
-        ok(/没有可撤销的整理/.test(notice), `界面应当只给一句提示：「${notice}」`);
-        ok(/没有删任何东西/.test(notice), `提示里要说清「没删东西」：「${notice}」`);
-        eq(seen.state.aiCalls.length, 0, '没有可撤销的整理时，绝不许调 AI 分类接口');
-        eq(seen.state.undoCalls, 0, '没有可撤销的整理时，不该去调撤销');
-        eq(JSON.stringify(listFiles(ctxA.outputDir)), JSON.stringify(outputBefore), '输出目录被动了（不该发生）');
-        eq(JSON.stringify(countTree(ctxA.src)), JSON.stringify(srcTreeBefore), '源目录被动了（不该发生）');
-        console.log(`      第二次点：界面提示「${notice}」；AI 调用次数仍然是 ${seen.state.aiCalls.length}（上一轮是 ${aiCallsBefore} 次）`);
-      } finally {
-        seen.close();
-      }
-    });
-
-    /* ================= 四：撤销失败 → 不许继续调 AI ================= */
-    await check('撤销接口返回失败（有文件删不掉）：如实显示撤销报告，且**不**继续调用 AI 接口', async () => {
-      const ctxB = makeCtx(path.join(tmpRoot, '撤销失败'), '撤销失败');
-      const failureTarget = path.join(ctxB.outputDir, '01_图片', '撤不掉的.jpg');
-      const seen = await startScenario(ctxB, rendererJs, 'ui-ai-undo-fail.js', {
-        undoOutcome: {
-          result: {
-            ok: false,
-            clean: false,
-            changed: true,
-            message: '撤销没有撤干净：1 个文件删不掉',
-            outputDir: ctxB.outputDir,
-            plannedFiles: 1,
-            plannedDirs: 1,
-            deletedFiles: 0,
-            skippedFiles: 1,
-            removedDirs: 0,
-            skippedDirs: 0,
-            files: [
-              {
-                target: failureTarget,
-                source: ctxB.srcFile,
-                action: 'skipped',
-                reason: '删不掉：文件被别的程序占用（跳过它，继续处理后面的）',
-              },
+    /* ================= 三：AI 分好 → 只出方案，不落盘；取消也不写 ================= */
+    await check(
+      'AI 分好之后只出关系链球、还没落盘：输出目录一个字节都没写；点「取消本次分拣」也不写、源文件没动',
+      async () => {
+        const ctx = makeCtx(tmpRoot, 'AI只出方案');
+        const seen = await startScenario(ctx, rendererJs, 'ui-ai-plan-only.js', {
+          dropOnly: true,
+          aiResult: {
+            ok: true,
+            message: 'AI 分好了：2 个（分 2 类）',
+            assignments: [
+              { source: ctx.files[0], category: '风景照' },
+              { source: ctx.files[1], category: '合同' },
             ],
-            dirs: [],
           },
-          summary: core.summarizeLastRun(null),
+        });
+        try {
+          seen.srcTreeBefore = countTree(ctx.src);
+          await clickSort(seen, 'sort-ai');
+          await assertPlanOnlyNoDisk(seen, ctx, '真产物');
+          console.log(`      预览：${seen.ui.planSummary}｜提示「${seen.ui.planNotice}」`);
+        } finally {
+          seen.close();
+        }
+      },
+    );
+
+    /* ================= 四：确认分拣 → 才落盘，按 AI 的分法 ================= */
+    await check('点「确认分拣」才落盘：按 AI 给的分类落地，源文件一个没少', async () => {
+      const ctx = makeCtx(tmpRoot, 'AI确认落盘');
+      const seen = await startScenario(ctx, rendererJs, 'ui-ai-confirm.js', {
+        dropOnly: true,
+        aiResult: {
+          ok: true,
+          message: 'AI 分好了：2 个（分 2 类）',
+          assignments: [
+            { source: ctx.files[0], category: '风景照' },
+            { source: ctx.files[1], category: '合同' },
+          ],
         },
       });
       try {
-        ok(seen.problems.length === 0, seen.problems.join(' | '));
-        ok(seen.state.organizeCalls === 1, '整理那一步没跑成（这一条没法验）');
-        const outputBefore = listFiles(ctxB.outputDir);
-        await clickAiReclassify(seen);
-        eq(seen.state.undoCalls, 1, '撤销接口应当被调到 1 次');
-        eq(seen.state.aiCalls.length, 0, '撤销失败之后绝不许继续调 AI 分类接口');
-        eq(seen.state.sequence.join('→'), 'undo', `撤销失败时序列里只该有「撤销」：实际 ${seen.state.sequence.join('→')}`);
-        const notice = seen.aiNotice[seen.aiNotice.length - 1] || '';
-        ok(/撤销没有成功/.test(notice), `界面要说清「撤销没有成功、这次不换分法」：「${notice}」`);
-        ok(!/本次已撤销/.test(notice), `撤销失败时不许说「已撤销」：「${notice}」`);
-        const report = seen.undoReportText || '';
-        ok(/(撤不掉|删不掉|占用)/.test(report), `撤销报告要如实显示为什么没撤掉：「${report}」`);
-        ok(report.includes(failureTarget), `撤销报告里要列出那个删不掉的文件：期望含 ${failureTarget}`);
-        eq(JSON.stringify(listFiles(ctxB.outputDir)), JSON.stringify(outputBefore), '撤销失败时不该动输出目录里剩下的东西');
-        console.log(`      撤销失败：序列「${seen.state.sequence.join('→')}」、AI 调用 0 次；界面「${notice}」`);
-        console.log(`      报告首行：${(report.split('\n')[0] || '').slice(0, 80)}`);
+        seen.srcTreeBefore = countTree(ctx.src);
+        await clickSort(seen, 'sort-ai');
+        const confirm = seen.run.elements.get('plan-confirm');
+        ok(!!confirm, '找不到「确认分拣」按钮');
+        ok(confirm.disabled !== true, '「确认分拣」不该是禁用的（方向没问题、方案也有）');
+        confirm.dispatch('click', { preventDefault() {} });
+        for (let i = 0; i < 80; i++) await flush();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        for (let i = 0; i < 10; i++) await flush();
+
+        eq(seen.state.organizeCalls, 1, '点「确认分拣」应当正好调一次整理接口');
+        const sent = seen.state.organizeAssignments || [];
+        eq(sent.length, ctx.files.length, '整理接口必须带上 AI 那份「文件 → 分类」表');
+
+        const landed = path.join(ctx.outputDir, '源', '风景照', '风景.jpg');
+        ok(fs.existsSync(landed), `输出里没有按 AI 的分类落地：期望 ${landed}，实际 ${JSON.stringify(listFiles(ctx.outputDir))}`);
+        ok(
+          fs.existsSync(path.join(ctx.outputDir, '源', '合同', '合同.pdf')),
+          `第二个文件也没按 AI 的分类落地：${JSON.stringify(listFiles(ctx.outputDir))}`,
+        );
+        for (const f of ctx.files) ok(fs.existsSync(f), `源文件不见了（只复制不移动）：${f}`);
+        eq(countTree(ctx.src).files, seen.srcTreeBefore.files, '源目录的文件数变了');
+        const ui = readUi(seen);
+        ok(/分拣完了/.test(ui.planNotice), `落盘之后界面要说清结果：「${ui.planNotice}」`);
+        console.log(`      落盘：${JSON.stringify(listFiles(ctx.outputDir))}`);
       } finally {
         seen.close();
       }
     });
 
     /* ================= 五：探针有效性自检 ================= */
-    await check('探针有效性自检：拿「先调 AI、后撤销」的产物喂给第 2 条那套断言必须判失败，真产物必须通过', async () => {
-      const crippled = aiBeforeUndo(rendererJs);
-      ok(crippled !== rendererJs, '没能造出「顺序反了」的产物样本');
-      // 样本确实被改坏了：第一次调用接口的那一句变成了 AI 分类（原来第一句是撤销）
-      const iFirstApi = crippled.indexOf('outcome = (await api.undoLastRun());');
-      const iFirstAi = crippled.indexOf('ai = (await api.aiClassify(');
-      ok(iFirstApi >= 0 && iFirstAi >= 0, '样本里缺少必要的接口调用（样本不对）');
-      ok(iFirstAi < iFirstApi, `样本里 AI 那一调没有排到撤销之前（样本不对：AI 在 ${iFirstAi}、撤销在 ${iFirstApi}）`);
-      const hits = [];
-      const ctxBad = makeCtx(path.join(tmpRoot, '顺序反了'), '顺序反了');
-      const bad = await runAiClickScenario(ctxBad, crippled, 'ui-ai-reversed.js', {});
-      const badSeq = bad.state.sequence.join('→');
-      const badAiCalls = bad.state.aiCalls.length;
-      const badUndoCalls = bad.state.undoCalls;
-      try {
+    await check(
+      '探针有效性自检：「AI 没配好却当成功」「一分拣就偷偷复制」的两个坏样本必须判失败，真产物必须通过',
+      async () => {
+        // 坏样本一：AI 失败当成成功 → 第 2 条那套判据必须判失败
+        const baitA = ignoreAiFailure(rendererJs);
+        ok(baitA !== rendererJs, '没能造出「AI 没配好却当成功」的样本');
+        const ctxA = makeCtx(tmpRoot, '坏样本-假装成功');
+        const seenA = await startScenario(ctxA, baitA, 'ui-ai-bait-a.js', { dropOnly: true });
+        let hitA = '';
         try {
-          assertUndoBeforeAi(bad, ctxBad, '顺序反了的产物');
-          hits.push(`顺序反了的产物居然被判通过了（序列 ${badSeq}）`);
-        } catch (err) {
-          hits.push(`顺序反了被抓到：${(err && err.message) || err}`);
+          seenA.srcTreeBefore = countTree(ctxA.src);
+          await clickSort(seenA, 'sort-ai');
+          try {
+            assertAiNotConfigured(seenA, ctxA, '坏样本一');
+            hitA = '坏样本一居然被判通过了（探针是死的）';
+          } catch (err) {
+            hitA = `坏样本一被抓到：${(err && err.message) || err}`;
+          }
+        } finally {
+          seenA.close();
         }
-      } finally {
-        bad.close();
-      }
-      ok(hits.length === 1 && /顺序反了被抓到/.test(hits[0]), `「顺序反了」的产物必须判失败：${hits.join(' | ')}`);
-      console.log(`      ${hits[0].slice(0, 170)}`);
-      console.log(`      反证样本的调用序列：${badSeq}（撤销 ${badUndoCalls} 次 / AI ${badAiCalls} 次）；执行问题：${bad.problems.join(' | ') || '无'}`);
+        ok(/被抓到/.test(hitA), hitA);
+        console.log(`      ${hitA.slice(0, 160)}`);
 
-      // 真产物用同一套断言，单独再跑一遍（不复用上面的结论）
-      const ctx = makeCtx(path.join(tmpRoot, '真产物复验'), '真产物复验');
-      const live = await runAiClickScenario(ctx, rendererJs, 'ui-ai-live-again.js', {});
-      try {
-        assertUndoBeforeAi(live, ctx, '真产物（复验）');
-        console.log(`      真产物复验通过（序列 ${live.state.sequence.join('→')}）`);
-      } finally {
-        live.close();
-      }
-    });
+        // 坏样本二：出方案时就偷偷复制 → 第 3 条那套判据必须判失败
+        const baitB = copiesAtPlanTime(rendererJs);
+        ok(baitB !== rendererJs, '没能造出「一分拣就偷偷复制」的样本');
+        const ctxB = makeCtx(tmpRoot, '坏样本-偷偷复制');
+        const seenB = await startScenario(ctxB, baitB, 'ui-ai-bait-b.js', {
+          dropOnly: true,
+          aiResult: {
+            ok: true,
+            message: 'AI 分好了：2 个（分 2 类）',
+            assignments: [
+              { source: ctxB.files[0], category: '风景照' },
+              { source: ctxB.files[1], category: '合同' },
+            ],
+          },
+        });
+        let hitB = '';
+        try {
+          seenB.srcTreeBefore = countTree(ctxB.src);
+          await clickSort(seenB, 'sort-ai');
+          try {
+            await assertPlanOnlyNoDisk(seenB, ctxB, '坏样本二');
+            hitB = '坏样本二居然被判通过了（探针是死的）';
+          } catch (err) {
+            hitB = `坏样本二被抓到：${(err && err.message) || err}`;
+          }
+        } finally {
+          seenB.close();
+        }
+        ok(/被抓到/.test(hitB), hitB);
+        console.log(`      ${hitB.slice(0, 160)}`);
+
+        // 真产物用同一套判据，单独再跑一遍（不复用上面的结论）
+        const ctxC = makeCtx(tmpRoot, '真产物复验');
+        const live = await startScenario(ctxC, rendererJs, 'ui-ai-live-again.js', {
+          dropOnly: true,
+          aiResult: {
+            ok: true,
+            message: 'AI 分好了：2 个（分 2 类）',
+            assignments: [
+              { source: ctxC.files[0], category: '风景照' },
+              { source: ctxC.files[1], category: '合同' },
+            ],
+          },
+        });
+        try {
+          live.srcTreeBefore = countTree(ctxC.src);
+          await clickSort(live, 'sort-ai');
+          await assertPlanOnlyNoDisk(live, ctxC, '真产物（复验）');
+          console.log('      真产物复验通过');
+        } finally {
+          live.close();
+        }
+      },
+    );
   } catch (err) {
     console.log(`FAIL: 测试过程本身出错 -> ${(err && err.stack) || err}`);
     results.push(['unexpected-error', false]);

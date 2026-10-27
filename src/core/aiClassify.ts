@@ -7,10 +7,12 @@
  * 1. **接口**：默认值按 DeepSeek 填好 —— 接口地址 `https://api.deepseek.com`（走 OpenAI 兼容的
  *    chat completions 形状）、默认模型名 `deepseek-chat`。**只是默认值，不是写死**：
  *    用户在设置里可以改成别的地址（任何 OpenAI 兼容的服务都行）。默认值在 `aiAppFiles.ts` 里。
- * 2. **AI 能看到什么**：只发**文件名（含后缀）、大小（字节）、修改时间（ISO）**这三样。
- *    **绝对不读文件内容、绝不把文件内容发出去**；也**不发文件所在目录路径**（免得泄露目录结构）。
- *    这条在界面上写明（那句提醒的唯一来源是 `aiAppFiles.ts` 的 `AI_METADATA_ONLY_WARNING`），
- *    也在 `buildOpenAiRequestBody()` 里只用这三个字段钉死。
+ * 2. **AI 能看到什么**：每个文件只发**文件名（含后缀）、大小（字节）、修改时间（ISO）**这三样。
+ *    **绝对不读文件内容、绝不把文件内容发出去**；也**不发文件的完整路径、不发盘符**。
+ *    另外（用户要求「原文件夹的已有目录结构被 AI 解析后保留为分类规则」）会把**原文件夹里已经存在的
+ *    分类目录名**一起发过去当候选分类 —— 只发**相对源文件夹的目录名**（如「票据」「2024/合同」），
+ *    不发绝对路径、不发盘符、不发上级目录。这三样在 `buildOpenAiRequestBody()` 里钉死；
+ *    界面上那句提醒的唯一来源是 `aiAppFiles.ts` 的 `AI_METADATA_ONLY_WARNING`。
  *
  * ============================================================================================
  * 这一片做了什么
@@ -28,7 +30,8 @@
  * ============================================================================================
  * 【将来接大模型（本片已经接上，形状仍是这份契约）】文件 → 分类名 的接口形状
  * ============================================================================================
- * 输入（`AiClassifyInput`）：要分类的文件列表与元信息（`path` / `name` / `ext`）+ 当前规则表
+ * 输入（`AiClassifyInput`）：要分类的文件列表与元信息（`path` / `name` / `ext`）+ 这次拖入的源文件夹
+ *   （`roots`：只用来读出「原文件夹已有的分类目录」当候选，见 `existingSchemeOf()`）+ 当前规则表
  *   （把「规则名」当成候选分类名给模型参考，**不是约束**，模型可以给新名字）+ 输出根（只作上下文，
  *   实现**不许**往那儿写东西）+ 这次用的接口设置（由调用方（主进程）读好传进来；没有 = 没配置）。
  * 输出（`AiClassifyResult`）：`ok:true` 时给 `assignments: { source, category, confidence?, reason? }[]`
@@ -181,6 +184,11 @@ function runtimeReady(): boolean {
 export interface AiClassifyInput {
   /** 要分类的文件（**只读**：分类不许改动、移动、删除它们） */
   files: readonly AiClassifyInputFile[];
+  /**
+   * 这次拖入/选中的源文件夹（**只用来读「原文件夹已有的目录结构」**，当候选分类名用）。
+   * 不给就只能靠文件名猜分类（旧行为）。
+   */
+  roots?: readonly string[] | null;
   /** 当前那套规则（分类名的候选，给模型作参考；不是约束） */
   rules?: readonly { name: string }[] | null;
   /** 本次的输出根（只作上下文；实现不许往那儿写东西） */
@@ -215,6 +223,15 @@ export type AiClassifyResult =
       assignments: AiAssignment[];
       /** 模型自己也说不清、需要回落规则分类的文件 */
       unclassified: string[];
+      /** 从原文件夹已有目录结构里读出来的分类名（这次给模型的候选；没有就是空数组） */
+      existingCategories: string[];
+      /** 这次 AI 另外新起的分类名（不在已有结构里；没有就是空数组） */
+      newCategories: string[];
+      /**
+       * `unclassified` 里有多少个是「本来就在子文件夹里、原样保留」的（不是真的没归类）。
+       * 界面据此分开说，别把「原样保留」说成「模型没说清、会按规则回落」。
+       */
+      keptAside: number;
       /** 一句人话（「AI 分好了：N 个」这种） */
       message: string;
     }
@@ -312,6 +329,87 @@ export function aiAssignmentsToRules(
 }
 
 /* ------------------------------------------------------------------ *
+ * 原文件夹已有的目录结构 → 候选分类名（用户要求 1 的实现处）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 从「源文件夹 + 这次要整理的那些文件」里读出**原文件夹已有的分类目录**。
+ *
+ * 为什么这么做（用户的原话）：**原文件夹的已有目录结构，AI 解析后要保留为分类规则，AI 在这个基础上分类**。
+ * 也就是说：用户已经把「票据、文档、合同」这些夹子建好了，散在根上的新文件应当被放进**这些已有的夹子**，
+ * 而不是每次都被 AI 另起一套新名字（「财务票据」「票据材料」这种）。
+ *
+ * 只做**纯字符串运算**（本模块不许碰磁盘）：文件的完整路径里，相对源文件夹的那几层目录就是已有分类。
+ * 发出去时也**只发这几层目录名**，绝不发绝对路径与盘符（见 `buildOpenAiRequestBody`）。
+ *
+ * @param files 这次要整理的文件（只要 `path`）
+ * @param roots 这次拖入/选中的源文件夹；为空 = 读不出结构（散文件模式仍按旧行为）
+ * @param limit 最多给几个候选分类（免得提示词撑爆）
+ */
+export function existingSchemeOf(
+  files: readonly { path: string }[],
+  roots?: readonly string[] | null,
+  limit = 30,
+): ExistingScheme {
+  const cap = Math.max(0, Number(limit) || 0) || 30;
+  const list = Array.from(roots ?? [])
+    .map((r) => normalizePath(String(r ?? '')))
+    .filter((r) => r.length > 0)
+    .sort((a, b) => b.length - a.length); // 深的排前面：嵌套源文件夹时先命中更具体的那个
+  if (list.length === 0) return { categories: [], insideCount: 0, insideFiles: [] };
+
+  /** 小写 key → 出现次数 */ const counts = new Map<string, number>();
+  /** 小写 key → 原样大小写的显示名 */ const display = new Map<string, string>();
+  /** 本来就在某个已有分类里的文件（小写完整路径）—— 它们会被原样保留，不参与 AI 分类 */
+  const inside = new Set<string>();
+  let insideCount = 0;
+
+  for (const file of files ?? []) {
+    const full = normalizePath(String(file?.path ?? ''));
+    if (full.length === 0) continue;
+    const root = list.find((r) => full.toLowerCase().startsWith(`${r.toLowerCase()}/`));
+    if (!root) continue;
+    const rel = full.slice(root.length + 1);
+    const parts = rel.split('/').filter((p) => p.length > 0);
+    if (parts.length <= 1) continue; // 这一份就在源文件夹根上：它才是要被分类的对象
+    insideCount++;
+    inside.add(full.toLowerCase());
+    const dirs = parts.slice(0, -1);
+    if (dirs.length > MAX_SCHEME_DEPTH) continue; // 太深的不当分类（噪声）
+    const key = dirs.join('/').toLowerCase();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    if (!display.has(key)) display.set(key, dirs.join('/'));
+  }
+
+  const categories = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, cap)
+    .map(([key]) => display.get(key) ?? key);
+
+  return { categories, insideCount, insideFiles: [...inside] };
+}
+
+/** 已有分类最多算几层（再深的就是文件自己的层级，不当分类用）。 */
+const MAX_SCHEME_DEPTH = 3;
+
+/** 统一成 `a/b/c` 这种斜杠形状（Windows 的 `\` 与小写盘符混在一起也能比）。 */
+function normalizePath(p: string): string {
+  return String(p ?? '')
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '');
+}
+
+/** 原文件夹已有目录结构里读出来的「分类方案」。 */
+export interface ExistingScheme {
+  /** 相对源文件夹的已有分类目录名（多级用 `/` 连接，如「票据」「2024/合同」） */
+  categories: string[];
+  /** 有多少份文件本来就在某个已有分类里（这些会被原样保留，不在 AI 的分类范围里） */
+  insideCount: number;
+  /** 本来就在某个已有分类里的那些文件（小写完整路径，用来把「原样保留」与「真的没归类」分开说） */
+  insideFiles: string[];
+}
+
+/* ------------------------------------------------------------------ *
  * 地址与请求体
  * ------------------------------------------------------------------ */
 
@@ -328,10 +426,12 @@ export interface AiFileMetadata {
 /** 模型必须按这个形状回话：`{ "分类名": ["文件名1", "文件名2"] }`。 */
 export type AiCategoryMap = Record<string, string[]>;
 
-/** chat completions 的路径：用户填的地址已经带 `/v1` 时不重复拼。 */
+/** chat completions 的路径：用户填的地址已经带 `/v1`（或整条 chat/completions 地址）时不重复拼。 */
 export function chatCompletionsPath(endpoint: string): string {
   const base = String(endpoint ?? '').trim().replace(/\/+$/, '');
   if (base.length === 0) return '';
+  // 直接把完整地址粘进来的（常见）：就按原样用，再拼一次会变成 …/chat/completions/v1/chat/completions
+  if (/\/chat\/completions$/i.test(base)) return '';
   return /\/v1$/i.test(base) ? '/chat/completions' : '/v1/chat/completions';
 }
 
@@ -342,15 +442,28 @@ export function chatCompletionsUrl(endpoint: string): string {
   return base.length === 0 || suffix.length === 0 ? '' : `${base}${suffix}`;
 }
 
-/** 按 OpenAI 兼容的形状拼请求体：**每个文件只带文件名 / 大小 / 修改时间**。 */
+/**
+ * 按 OpenAI 兼容的形状拼请求体：**每个文件只带文件名 / 大小 / 修改时间**；
+ * 另外可带「原文件夹里已有的分类目录名」（只发相对目录名，不发绝对路径）。
+ *
+ * @param model 模型名
+ * @param files 这批文件的元信息
+ * @param candidateCategories 候选分类名（规则里的分类名，**不是约束**）
+ * @param extraHint 附加的一句话
+ * @param existingCategories 原文件夹里已有的分类目录名（用户要求：AI 在这些已有分类的基础上分）
+ */
 export function buildOpenAiRequestBody(
   model: string,
   files: readonly AiFileMetadata[],
   candidateCategories?: readonly string[] | null,
   extraHint = '',
+  existingCategories?: readonly string[] | null,
 ): string {
   const hint = String(extraHint ?? '').trim();
   const list = (candidateCategories ?? [])
+    .map((c) => String(c ?? '').trim())
+    .filter((c) => c.length > 0);
+  const existing = (existingCategories ?? [])
     .map((c) => String(c ?? '').trim())
     .filter((c) => c.length > 0);
   const parts = [
@@ -358,6 +471,15 @@ export function buildOpenAiRequestBody(
     '每个文件只有三样信息：文件名（含后缀）、大小（字节）、修改时间（ISO）。',
     '请只输出一个 JSON 对象，形状是 {"分类名": ["文件名1", "文件名2"]}，不要输出任何别的文字、不要用代码块包起来。',
   ];
+  // 用户的原话：「原文件夹的已有目录结构被 AI 解析后保留为分类规则，AI 分类在此基础上分类」
+  // 所以已有分类要说在最前面、并且是**优先项**，不能只是「可以参考」。
+  if (existing.length > 0) {
+    parts.push(`原文件夹里已经分好的目录（这些会原样保留，不用你重新分）：${existing.join('、')}。`);
+    parts.push(
+      '请把还没归类的文件**优先放进上面这些已有分类**：分类名必须与它们一字不差（多级的写全，例如 2024/合同）。' +
+        '只有当某个文件确实不属于任何已有分类时，才可以另起一个新的分类名（名字要短、要能一眼看懂）。',
+    );
+  }
   if (list.length > 0) parts.push(`可以参考这些已有的分类名（也可以另起更合适的名字）：${list.join('、')}。`);
   if (hint.length > 0) parts.push(hint);
   parts.push(`文件清单（JSON）：${JSON.stringify({ files })}`);
@@ -614,11 +736,13 @@ function chunk<T>(list: readonly T[], size: number): T[][] {
  */
 export async function classifyByAi(input: AiClassifyInput): Promise<AiClassifyResult> {
   const files = Array.from(input?.files ?? []);
-  // 设置从哪来：优先「直接给的那一份」，其次「按位置读回来的那份」（两条都走同一处校验）
+  // 设置从哪来：优先「直接给的那一份」，其次「按位置读回来的那份」（两条都过同一道校验）。
+  //
+  // ⚠️ 直接给的那一份必须走 `parseAiConfigText`（收「配置文字」），**不能**走 `loadAiConfig`
+  // ——后者的参数是「配置文件路径」，把 JSON 文字当路径去读文件必然读不到，于是被判成「没配置」。
+  // 这正是「测试连接通、AI 分类永远说没配置」那个 bug 的根因：界面走的是「直接给三项」这条路。
   const call = input?.call
-    ? loadAiConfig(
-        // 直接给的那一份也要过同一道校验：把三项拼成一段配置文字再收回来，
-        // 免得「读回来的」和「直接给的」两套判据不一致
+    ? parseAiConfigText(
         JSON.stringify({
           endpoint: String(input.call.endpoint ?? ''),
           model: String(input.call.model ?? ''),
@@ -638,6 +762,10 @@ export async function classifyByAi(input: AiClassifyInput): Promise<AiClassifyRe
   }
 
   const candidate = (input?.rules ?? []).map((r) => String(r?.name ?? '')).filter((n) => n.length > 0);
+  // 原文件夹里已经存在的分类目录：优先当候选，并且要求模型「一字不差地用这些名字」（用户要求 1）
+  const scheme = existingSchemeOf(files, input?.roots);
+  const existingSet = new Set(scheme.categories);
+  const allCandidates = Array.from(new Set([...scheme.categories, ...candidate]));
   const timeoutMs = Number(input?.timeoutMs) > 0 ? Number(input?.timeoutMs) : AI_TIMEOUT_MS;
   const model = String(call.model ?? '').trim();
 
@@ -658,8 +786,9 @@ export async function classifyByAi(input: AiClassifyInput): Promise<AiClassifyRe
     const body = buildOpenAiRequestBody(
       model,
       meta,
-      candidate,
+      allCandidates,
       '只归类，不要解释：你看到的只有文件名、大小与修改时间，你看不到、也不要猜文件内容。',
+      scheme.categories,
     );
     const outcome = await requestWithRetry(call, body, timeoutMs);
     if (!outcome.ok) {
@@ -685,13 +814,34 @@ export async function classifyByAi(input: AiClassifyInput): Promise<AiClassifyRe
       message: `AI 没有给出可用的分类（回了 ${Object.keys(merged).length} 个分类名，但一个都没对上这批文件），先按规则分类`,
     };
   }
-  const tail =
-    matched.unclassified.length > 0 ? `；还有 ${matched.unclassified.length} 个模型没说清，会按规则分类` : '';
+  // 剩下的那些要分清两种情况，别混成一句「模型没说清」：
+  //   ① 本来就在子文件夹里的（原样保留，本来就不需要 AI 分类）；
+  //   ② 真没被归类的（会按规则回落）。
+  const insideSet = new Set(scheme.insideFiles);
+  const keptCount = matched.unclassified.filter((p) => insideSet.has(normalizePath(p).toLowerCase())).length;
+  const restCount = matched.unclassified.length - keptCount;
+  const tailParts: string[] = [];
+  if (restCount > 0) tailParts.push(`还有 ${restCount} 个模型没说清，会按规则分类`);
+  if (keptCount > 0) tailParts.push(`另有 ${keptCount} 个本来就在子文件夹里，原样保留`);
+  const tail = tailParts.length > 0 ? `；${tailParts.join('；')}` : '';
+  // 「沿用了几个已有分类、另外新起了几个」——用户要的就是「在原结构基础上分」，所以这话必须说出来
+  const usedCats = Object.keys(merged);
+  const reused = usedCats.filter((c) => existingSet.has(c));
+  const fresh = usedCats.filter((c) => !existingSet.has(c));
+  const basis =
+    scheme.categories.length === 0
+      ? ''
+      : reused.length > 0
+        ? `；沿用了原文件夹已有的 ${reused.length} 个分类${fresh.length > 0 ? `，另外新起 ${fresh.length} 个` : ''}`
+        : `；原文件夹里那 ${scheme.categories.length} 个已有分类这次都没用上，全按新分类走`;
   return {
     ok: true,
     assignments: matched.assignments,
     unclassified: matched.unclassified,
-    message: `AI 分好了：${matched.assignments.length} 个（分 ${Object.keys(merged).length} 类）${tail}`,
+    existingCategories: scheme.categories.slice(),
+    newCategories: fresh,
+    keptAside: keptCount,
+    message: `AI 分好了：${matched.assignments.length} 个（分 ${usedCats.length} 类）${basis}${tail}`,
   };
 }
 
@@ -725,15 +875,18 @@ export function toAiInputFiles(paths: readonly string[]): AiClassifyInputFile[] 
  * @param outputDir 本次的输出根（只作上下文；本实现不往那儿写东西）
  * @param call 这次用的接口设置（由主进程读好传进来；不给 = 没配置）
  * @param onProgress 分批进度回调
+ * @param roots 这次拖入/选中的源文件夹（用来读原文件夹已有的目录结构当候选分类；不给就只靠文件名）
  */
 export async function aiClassifyByPaths(
   filePaths: readonly string[],
   outputDir?: string | null,
   call?: AiConfig | null,
   onProgress?: AiProgressHandler | null,
+  roots?: readonly string[] | null,
 ): Promise<AiClassifyResult> {
   return classifyByAi({
     files: toAiInputFiles(filePaths),
+    roots: roots ?? null,
     outputDir: outputDir ?? null,
     call: call ?? null,
     onProgress: onProgress ?? null,

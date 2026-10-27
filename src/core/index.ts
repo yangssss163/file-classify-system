@@ -11,6 +11,10 @@ export * from './preview';
 export * from './expandAndPlan';
 export * from './outputDirection';
 export * from './runRecord';
+// 用户确认后删源文件（唯一会动用户原始文件的动作，红线在文件头写着）
+export * from './sourceDeletion';
+// 历史单号（每次分拣一张单，按时间倒序）
+export * from './history';
 // AI 分类器（真实现）：**整个产品里与 AI 有关的实现只有这四个文件**，各管一段：
 //   · `aiAppFiles.ts`  —— 用户设置（接口地址 / 模型名 / 密钥）放在哪儿、怎么读写（密钥只进那个配置文件）；
 //   · `aiClassify.ts`  —— 地址拼接、请求体（只带文件名/大小/修改时间）、解析、对上原文件、批次与重试；

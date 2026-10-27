@@ -189,25 +189,50 @@ async function main() {
       console.log(`      输出：${countTree(c1.outputDir).files} 个文件 / ${countTree(c1.outputDir).dirs} 个目录；记录里的文件 ${record1.files.length} 个、目录 ${record1.directories.length} 个`);
     });
 
-    await check('正常撤销：撤销后本次复制出来的文件全部消失、空目录被清掉、源文件一个不少且内容不变，报告数字与实际一致', () => {
+    await check('正常撤销：撤销后本次复制出来的文件全部消失、分类夹被清掉、**输出根目录本身留着**、源文件一个不少且内容不变', () => {
       const before = countTree(c1.outputDir);
       const records = record1.files.map((f) => f.target);
-      undo1 = core.undoLastRun(c1.recordPath);
+      const auditPath = path.join(c1.dir, '删除审计.log');
+      undo1 = core.undoLastRun(c1.recordPath, { auditPath });
 
       eq(undo1.ok, true, '撤销应当成功返回');
       eq(undo1.deletedFiles, records.length, '报告里「删掉的文件数」应当等于本次复制出来的文件数');
       for (const t of records) ok(!fs.existsSync(t), `撤销后这个文件应当消失：${t}`);
       const after = countTree(c1.outputDir);
       eq(after.files, 0, `撤销后输出目录里不该还有文件（撤销前 ${before.files} 个）`);
-      // 由程序创建的目录都被清掉（输出根自己也是这次新建的）
-      for (const d of record1.directories) {
-        ok(!fs.existsSync(d), `撤销后由程序创建的目录应当清掉：${d}`);
-      }
-      eq(undo1.removedDirs, record1.directories.length, '报告里「清掉的目录数」应当等于本次创建的目录数');
-      const dirsLeft = fs.existsSync(c1.outputDir) ? countTree(c1.outputDir).dirs : 0;
-      eq(dirsLeft, 0, '撤销后输出里不该还剩目录（用户没往里加过东西）');
+
+      // **输出根目录本身必须留着**（用户报过「目的文件夹消失了」）：
+      // 它可能也是这次整理新建的，但那是用户自己选的目录，撤销只清它下面由程序建的分类夹。
+      ok(
+        fs.existsSync(c1.outputDir),
+        `撤销把输出根目录本身删掉了（不许可：那是用户自己选的目录）：${c1.outputDir}`,
+      );
+      const rootHit = undo1.dirs.find((d) => path.resolve(d.dir).toLowerCase() === path.resolve(c1.outputDir).toLowerCase());
+      ok(rootHit, `报告里应当有输出根目录这一条处置：${c1.outputDir}`);
+      eq(rootHit.action, 'skipped', '输出根目录那一行必须是「跳过」（留着不动），绝不能是「清掉」');
+      ok(/输出根目录/.test(rootHit.reason), `报告原因里应当说清「输出根目录留着」：「${rootHit.reason}」`);
+
+      // 它下面的分类夹（由程序新建、现在空了）照样都被清掉
+      const innerDirs = record1.directories.filter(
+        (d) => path.resolve(d).toLowerCase() !== path.resolve(c1.outputDir).toLowerCase(),
+      );
+      ok(innerDirs.length > 0, '前置不成立：记录里应当有「输出根下面的分类夹」');
+      for (const d of innerDirs) ok(!fs.existsSync(d), `撤销后由程序创建的分类夹应当清掉：${d}`);
+      eq(undo1.removedDirs, innerDirs.length, '报告里「清掉的目录数」应当等于「输出根下面的分类夹数」');
+      const dirsLeft = countTree(c1.outputDir).dirs;
+      eq(dirsLeft, 0, '撤销后输出根里不该还剩目录（用户没往里加过东西）');
       eq(undo1.skippedFiles, 0, '这一轮不该有跳过的文件');
-      eq(undo1.skippedDirs, 0, '这一轮不该有跳过的目录');
+      eq(undo1.skippedDirs, 1, '这一轮只该有「输出根目录」这 1 个跳过（留着不动）');
+
+      // 删除审计：删了什么、清了哪个目录都记了一行；但没有「把输出根删掉」这种事
+      ok(fs.existsSync(auditPath), `删除审计日志没落地：${auditPath}`);
+      const audit = fs.readFileSync(auditPath, 'utf8');
+      ok(/撤销（记录/.test(audit), `审计日志缺了这次撤销的抬头：「${audit.slice(0, 120)}」`);
+      for (const t of records.slice(0, 3)) ok(audit.includes(t), `审计日志里应当记下删掉的这个文件：${t}`);
+      ok(
+        !new RegExp(`目录 removed ${c1.outputDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(audit),
+        '审计日志里出现了「把输出根目录 removed」—— 这不该发生',
+      );
 
       // 源文件：一个不少、内容不变
       eq(JSON.stringify(snapshotContents(src1)), JSON.stringify(src1Before), '源文件的内容/个数变了（这是红线）');

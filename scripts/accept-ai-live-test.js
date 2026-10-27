@@ -32,6 +32,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const dns = require('node:dns');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
@@ -629,6 +630,95 @@ async function main() {
       },
     ]);
 
+    /* ================= 主机名（走 DNS 解析）也要能连 =================
+     * 为什么单独一条：本片之前所有断言都用 127.0.0.1 —— 那是 IP 字面量，**不经过 lookup**，
+     * 所以「lookup 回调形状不对」这个 bug 一条都抓不到，直到用户填真域名才暴露
+     * （ERR_INVALID_IP_ADDRESS）。这里用 localhost 让请求必须走一次主机名解析。
+     */
+    tests.push([
+      '主机名（不是 IP 字面量）也能连上：解析地址时要按 Node 要的「全部地址」形状回话',
+      async () => {
+        const fake = await startFakeService(() => ({ status: 200, body: openAiOk({ 图片: ['风景照.jpg'] }) }));
+        try {
+          const hostEndpoint = fake.baseUrl.replace('127.0.0.1', 'localhost');
+          const r = await core.testAiConnection(
+            { endpoint: hostEndpoint, model: 'fake-model', authToken: 'fake-token' },
+            8000,
+          );
+          eq(r.ok, true, `用主机名连不上：${r.message}`);
+          ok(fake.seen.length === 1, `应当正好收到一次请求，实际 ${fake.seen.length} 次`);
+          console.log(`      主机名也连通：${hostEndpoint}`);
+
+          // 探针：同一个「假主机名 + 自定义解析」，旧写法（只回一个地址）必须被 Node 判成 ERR_INVALID_IP_ADDRESS
+          const port = Number(new URL(fake.baseUrl).port);
+          const probeOnce = (legacy) =>
+            new Promise((resolve) => {
+              const req = http.request(
+                {
+                  host: 'probe-host.invalid',
+                  port,
+                  path: '/v1/chat/completions',
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  lookup: (hostname, opts, cb) => {
+                    const addr = '127.0.0.1';
+                    if (opts && opts.all) return legacy ? cb(null, addr, 4) : cb(null, [{ address: addr, family: 4 }]);
+                    return cb(null, addr, 4);
+                  },
+                },
+                (res) => {
+                  res.resume();
+                  resolve('no-error');
+                },
+              );
+              req.on('error', (e) => resolve(e.code || e.message));
+              req.end('{}');
+            });
+          const legacyErr = await probeOnce(true);
+          eq(legacyErr, 'ERR_INVALID_IP_ADDRESS', `旧写法应当被 Node 判成 ERR_INVALID_IP_ADDRESS（实际 ${legacyErr}）`);
+          eq(await probeOnce(false), 'no-error', '按 all 形状回话时应当能连上（探针本身不能是坏的）');
+          console.log('      探针：旧写法确实被 Node 判成 ERR_INVALID_IP_ADDRESS（这条断言抓得住它）');
+        } finally {
+          await fake.close();
+        }
+      },
+    ]);
+
+    /* ================= 界面那条路：直接给三项，不经过配置文件 =================
+     * 为什么单列：界面上「换一种分法」走的是 `aiClassifyByPaths(paths, out, call)` ——
+     * 设置是**直接给的对象**，不是「配置文件路径」。这条路上曾经把对象拼成 JSON 再喂给
+     * `loadAiConfig()`（它的参数是路径），于是永远读不到 → 永远「没配置」；
+     * 而「测试连接」走的是另一条路，所以一直是通的。**只测 configPath 就永远抓不到。**
+     */
+    tests.push([
+      '界面那条路（直接给接口地址/模型/密钥）也能分类，且不与「按路径读配置」混用',
+      async () => {
+        const fake = await startFakeService(() => ({ status: 200, body: openAiOk({ 图片: ['风景照.jpg'] }) }));
+        try {
+          const call = { endpoint: fake.baseUrl, model: 'fake-model', authToken: 'fake-token' };
+          const viaObject = await core.aiClassifyByPaths(files, outputDir, call);
+          eq(viaObject.ok, true, `直接给三项时应当能分类：${viaObject.message}`);
+          eq(fake.seen.length, 1, '应当正好发出一次请求');
+          ok(sentFiles(fake.seen[0]).files.length === files.length, '请求里该带上这批文件的元信息');
+          console.log('      直接给三项：分类成功（界面走的就是这条路）');
+
+          // 语义自检：配置**文字**能被收成设置；把它当**路径**去读一定读不到。
+          // 当初的 bug 就是把这两件事混了 —— 于是「测试连接」通、「AI 分类」永远说没配置。
+          const text = JSON.stringify(call);
+          ok(core.parseAiConfigText(text) !== null, '配置文字应当能被 parseAiConfigText 收成设置');
+          eq(core.loadAiConfig(text), null, '把配置文字当路径去读必须读不到（两者语义不同）');
+
+          // 少密钥 → 仍然是「没配置」，而且一个请求都不发
+          const before = fake.seen.length;
+          const noKey = await core.aiClassifyByPaths(files, outputDir, { endpoint: fake.baseUrl, model: 'm', authToken: '' });
+          eq(noKey.ok, false, '缺密钥时必须是 ok:false');
+          eq(noKey.reason, 'not-configured', '缺密钥的原因码应当是 not-configured');
+          eq(fake.seen.length, before, '缺密钥时一个请求都不该发');
+        } finally {
+          await fake.close();
+        }
+      },
+    ]);
     /* ================= 走一遍 ================= */
     for (const [name, fn] of tests) {
       await check(name, fn);

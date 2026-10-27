@@ -16,6 +16,8 @@ out/
 !src/**
 !scripts/
 !scripts/**
+!assets/
+!assets/**
 !文件管理器需求分析.html
 
 # --- 工作台自己加的工作区 ---

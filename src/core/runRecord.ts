@@ -8,7 +8,10 @@
  *  4. 记录里那个文件的大小跟当前磁盘上的对不上（用户改过 / 换过一个同名文件）→ **跳过并说明**，绝不删；
  *  5. 单个文件删不掉（被占用 / 没权限）→ 跳过、记原因、**继续处理后面的**，绝不整体崩；
  *  6. 撤销是**幂等**的：撤过一次就标记「已撤销」，再撤一次不删任何东西、不报错，给一句人话；
- *  7. 记录是**持久化**的（一个 JSON 文件）：关掉程序再打开，仍然能撤销上一次整理。
+ *  7. 记录是**持久化**的（一个 JSON 文件）：关掉程序再打开，仍然能撤销上一次整理；
+ *  8. **输出根目录本身永不删除**：那是用户自己选的目录，撤销只清它下面「由程序新建、且变空」的分类夹。
+ *     （用户报过「目的文件夹消失了」—— 旧实现会把整批撤空的输出根一起 rmdir 掉，看起来就像文件夹自己没了。）
+ *     每删一个文件 / 清一个目录都写一行**删除审计**（`organizer-delete-audit.log`），方便以后追。
  *
  * 「什么都不删」也是成功：本文件的函数**一律不抛异常**，任何异常都变成人话原因。
  */
@@ -19,6 +22,15 @@ import { isInsideDir, sameDir } from './outputDirection';
 
 /** 记录文件的固定文件名（放在 userData 目录下）。 */
 export const RUN_RECORD_FILE_NAME = 'organizer-last-run.json';
+
+/**
+ * **删除审计**的固定文件名（放在 userData 目录下，和记录同一个目录）。
+ *
+ * 为什么要有它：用户报过一个偶发问题 ——「目的文件夹消失了，可能是软件关闭后自动清除了？」。
+ * 程序里唯一会删东西的地方就是这里（撤销），所以撤销每删一个文件 / 一个目录都往这份日志里记一行。
+ * 以后真再遇到「文件夹不见了」，打开这份日志就能判断到底是不是程序干的（里面没有记录 = 不是程序干的）。
+ */
+export const RUN_AUDIT_FILE_NAME = 'organizer-delete-audit.log';
 
 /** 记录格式版本，便于以后改动时不误读（"1/2" 那种字符串，写成数字 "2" 也能认）。 */
 export const RUN_RECORD_SCHEMA_VERSION = '1';
@@ -67,6 +79,8 @@ export interface RunRecord {
   failures: RunRecordFailure[];
   /** 已经撤销过的时间（ISO 字符串）；null = 还没撤过，可以撤 */
   undoneAt: string | null;
+  /** 已经删过源文件的时间（ISO 字符串）；null/缺省 = 还没删过。删源文件是用户另外点的一次动作 */
+  sourcesDeletedAt?: string | null;
 }
 
 /** 撤销时一个文件的处置结果。 */
@@ -179,6 +193,7 @@ export function normalizeRunRecord(input: unknown): RunRecord {
     failureNote: String(raw.failureNote ?? ''),
     failures,
     undoneAt: raw.undoneAt ? String(raw.undoneAt) : null,
+    sourcesDeletedAt: raw.sourcesDeletedAt ? String(raw.sourcesDeletedAt) : null,
   };
 }
 
@@ -337,6 +352,27 @@ function depthOf(p: string): number {
   return String(p).replace(/\//g, '\\').split('\\').filter((s) => s.length > 0).length;
 }
 
+/** 撤销时可以带的选项。 */
+export interface UndoOptions {
+  /**
+   * 删除审计日志的位置（`organizer-delete-audit.log`）。
+   * 给了就把这次删掉的每个文件 / 每个目录记一行；不给就不记（验收里多数用例不关心它）。
+   */
+  auditPath?: string | null;
+}
+
+/** 往审计日志里追加几行（写不进去也绝不影响撤销本身）。 */
+export function appendDeleteAudit(auditPath: string, lines: readonly string[]): void {
+  const target = String(auditPath ?? '').trim();
+  if (target.length === 0 || lines.length === 0) return;
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.appendFileSync(target, `${lines.join('\n')}\n`, 'utf8');
+  } catch {
+    /* 记不下来不算失败：撤销本身该做的都做了 */
+  }
+}
+
 /** 把一个目标路径翻译成「为什么不能删」的人话；能删就返回 null。 */
 function whyNotDeletable(entry: RunRecordFile, record: RunRecord, outDir: string): string | null {
   const target = String(entry.target ?? '');
@@ -358,9 +394,11 @@ function whyNotDeletable(entry: RunRecordFile, record: RunRecord, outDir: string
  * 撤销上一次整理。
  *
  * @param filePath 记录文件路径（主进程给的是 userData 下那个；验收给的是临时路径）
+ * @param options.auditPath 删除审计日志的位置（给了就把「删了什么」记下来；不给就不记）
  */
-export function undoLastRun(filePath: string): UndoResult {
+export function undoLastRun(filePath: string, options?: UndoOptions | null): UndoResult {
   const target = String(filePath ?? '');
+  const auditPath = typeof options?.auditPath === 'string' ? options.auditPath : '';
   const record = loadRunRecord(target);
 
   if (!record) {
@@ -469,6 +507,17 @@ export function undoLastRun(filePath: string): UndoResult {
       dirs.push({ dir, action: 'skipped', reason: `这个目录不在本次的输出目录里（${outDir}），不在撤销范围内，跳过` });
       continue;
     }
+    // 用户报过「目的文件夹（输出根）消失了」：输出根是**用户自己选的目录**，撤销只清它下面
+    // 由程序新建的分类夹，根目录本身一概留着 —— 哪怕它也是这次整理新建出来的。
+    // （以前的实现会把它一起 rmdir 掉：整批撤完后输出根就没了，看起来就像「文件夹自己消失了」。）
+    if (sameDir(dir, outDir)) {
+      dirs.push({
+        dir,
+        action: 'skipped',
+        reason: '这是你自己选的输出根目录：撤销只清它下面由程序建的分类夹，根目录留着不动',
+      });
+      continue;
+    }
     try {
       fs.rmdirSync(dir); // 只在**空**的时候才成功；里面还有东西就报错，正是我们要的
       dirs.push({ dir, action: 'removed', reason: '这是本次整理新建的目录，现在空了，已清掉' });
@@ -496,10 +545,19 @@ export function undoLastRun(filePath: string): UndoResult {
   const updated: RunRecord = { ...record, undoneAt: stamp };
   const saved = saveRunRecord(target, updated);
 
+  // 删除审计：删掉/清掉的每一个都记一行（跳过的也记，省得以后查不清「为什么它还在」）
+  const auditLines: string[] = [
+    `[${stamp}] 撤销（记录 ${target}，输出根 ${outDir}）：删掉 ${deletedFiles} 个文件、清掉 ${removedDirs} 个目录、跳过 ${skippedFiles}/${skippedDirs}`,
+  ];
+  for (const f of files) auditLines.push(`  文件 ${f.action} ${f.target} —— ${f.reason}`);
+  for (const d of dirs) auditLines.push(`  目录 ${d.action} ${d.dir} —— ${d.reason}`);
+  appendDeleteAudit(auditPath, auditLines);
+
   const parts = [`撤销完成：删掉 ${deletedFiles} 个文件、${removedDirs} 个目录`];
   if (skippedFiles > 0 || skippedDirs > 0) {
     parts.push(`跳过 ${skippedFiles} 个文件、${skippedDirs} 个目录（原因见下）`);
   }
+  parts.push('输出根目录本身留着不动（那是你自己选的目录）');
   parts.push(`原文件一个都没动（本次整理共复制成功 ${record.successCount} 个）`);
   if (!saved.ok) parts.push(`（注意：记录没能标记成「已撤销」：${saved.message}）`);
 

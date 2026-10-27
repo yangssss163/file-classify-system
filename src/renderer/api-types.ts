@@ -21,8 +21,8 @@ export interface PreviewFileError {
 
 /** 预览树里的一个文件。 */
 export interface PreviewFile {
-  /** 原文件路径 */
-  path: string;
+  /** 原文件路径（名字不叫 `path`：界面里不许出现 `.path` 那种属性读法） */
+  fullPath: string;
   /** 文件名（含后缀） */
   name: string;
   /** 小写后缀，不含点；无后缀为 '' */
@@ -341,6 +341,17 @@ export interface UndoRunOutcome {
 /** 修改时间的三种分档。 */
 export type ModTimeBucket = 'any' | 'this-year' | 'last-year' | 'earlier';
 
+/**
+ * 一条「显式分类」：这次「谁去哪个夹」已经定好，不再按规则算。
+ * AI 分完直接整理、或先用 AI 的结论预览，都用这张清单。
+ */
+export interface CategoryAssignmentView {
+  /** 原文件完整路径 */
+  source: string;
+  /** 分类名（可多级：`照片\风光`） */
+  category: string;
+}
+
 /** 规则条件：四种可组合；没写的项不参与判断。 */
 export interface RuleCondition {
   /** 后缀列表（小写、不含点；匹配大小写不敏感） */
@@ -414,7 +425,18 @@ export interface AiSeedAssignment {
 }
 
 export type AiSeedClassifyOutcome =
-  | { ok: true; assignments: AiSeedAssignment[]; unclassified: string[]; message: string }
+  | {
+      ok: true;
+      assignments: AiSeedAssignment[];
+      unclassified: string[];
+      /** 原文件夹里已有的分类目录（这次给模型的候选；用来在建议卡上说清「沿用了哪几个」） */
+      existingCategories?: string[];
+      /** 这次 AI 另外新起的分类 */
+      newCategories?: string[];
+      /** `unclassified` 里有多少个「本来就在子文件夹里、原样保留」（界面据此分开说，别都说成「模型没说清」） */
+      keptAside?: number;
+      message: string;
+    }
   | { ok: false; reason: 'not-configured' | 'request-failed' | 'empty-result'; message: string };
 
 /** 界面上那行常显的 AI 状态（「AI 分类：未配置」里的原话由核心模块给，界面照抄）。 */
@@ -471,6 +493,48 @@ export interface AiSeedProgress {
 }
 
 /** 预加载脚本暴露到 window.organizer 上的那一套方法。 */
+/** 历史里的一张单（每次分拣一张，按时间倒序显示）。 */
+export interface HistoryEntryView {
+  /** 单号（`261027-1712-4F2A` 这种） */
+  id: string;
+  /** 开始时间（ISO 字符串） */
+  at: string;
+  /** 这次用的分法 */
+  mode: 'ai' | 'rules';
+  fileCount: number;
+  successCount: number;
+  failureCount: number;
+  outputDir: string;
+}
+
+/** 删源时一个文件的处置结果。 */
+export interface SourceDeleteFileOutcomeView {
+  source: string;
+  target: string;
+  action: 'deleted' | 'skipped';
+  reason: string;
+}
+
+/** 删源时一个目录的处置结果。 */
+export interface SourceDeleteDirOutcomeView {
+  dir: string;
+  action: 'removed' | 'skipped';
+  reason: string;
+}
+
+/** 删源文件的结果。 */
+export interface SourceDeleteResultView {
+  ok: boolean;
+  changed: boolean;
+  message: string;
+  plannedFiles: number;
+  deletedFiles: number;
+  skippedFiles: number;
+  removedDirs: number;
+  files: SourceDeleteFileOutcomeView[];
+  dirs: SourceDeleteDirOutcomeView[];
+}
+
 export interface OrganizerApi {
   /** 把拖进来的 File 换成磁盘路径（preload 里用 webUtils.getPathForFile）；取不到给 null */
   pathForFile(file: File): string | null;
@@ -483,10 +547,30 @@ export interface OrganizerApi {
   expand(roots: string[]): Promise<ScanResult>;
   /** 放下「这一次预览要按源文件夹各归各处理」的那批源文件夹（只读地用一次就清掉） */
   setSourceRoots(roots: string[] | null): Promise<boolean>;
-  /** 预览：只读计算，绝不写盘；规则表由界面传进去，跟当前界面上的规则保持一致 */
-  preview(files: string[], outputDir: string | null, rules?: Rule[] | null): Promise<PreviewOutcome>;
+  /**
+   * 放下「这一次预览要用的显式分类」（AI 分好之后先看一遍时用；只读地用一次就清掉）。
+   * 单独一个入口的原因：`preview(...)` 那条调用被验收第 7 条用字面量钉着（三参，不许改）。
+   */
+  setPreviewAssignments?(assignments: readonly CategoryAssignmentView[] | null): Promise<boolean>;
+  /**
+   * 预览：只读计算，绝不写盘；规则表由界面传进去，跟当前界面上的规则保持一致。
+   * `assignments`（可选）= 这次「谁去哪个夹」的显式分类（AI 分完先看一遍时用），
+   * 不给就是纯按规则算。
+   */
+  preview(
+    files: string[],
+    outputDir: string | null,
+    rules?: Rule[] | null,
+    assignments?: readonly CategoryAssignmentView[] | null,
+  ): Promise<PreviewOutcome>;
   /** 整理：传了 roots 就走「源文件夹各归各」（每个源文件夹一份，绝不互相混） */
-  organize(files: string[], outputDir: string, rules?: Rule[] | null, roots?: string[] | null): Promise<CopySummary>;
+  organize(
+    files: string[],
+    outputDir: string,
+    rules?: Rule[] | null,
+    roots?: string[] | null,
+    assignments?: readonly CategoryAssignmentView[] | null,
+  ): Promise<CopySummary>;
   openPath(dir: string): Promise<string>;
   /** 读取上次保存的规则；读不到就是默认规则 */
   loadRules(): Promise<RulesLoadResult>;
@@ -506,6 +590,10 @@ export interface OrganizerApi {
   lastRun(): Promise<UndoSummary>;
   /** 撤销上一次整理：只删记录里列出的目标路径，原文件一律不动；幂等（撤过一次再点不删任何东西） */
   undoLastRun(): Promise<UndoRunOutcome>;
+  /** 历史单号（按时间倒序；读坏了是空表） */
+  historyList(): Promise<HistoryEntryView[]>;
+  /** 用户确认后删源文件（移到回收站；只删这次复制成功的那些） */
+  deleteSources(): Promise<SourceDeleteResultView>;
   /** 开工前的输出方向校验（危险就不开工，一个字节都不写） */
   checkOutputDirection(input: {
     roots?: string[] | null;
@@ -526,7 +614,12 @@ export interface OrganizerApi {
   aiConfigTest(input: { endpoint: string; model: string; authToken: string }): Promise<AiSeedTestResult>;
   /** 把 AI 建议变成既有规则表里的规则（界面据此让人确认，再走既有管线落盘） */
   aiSuggestRules(assignments: readonly AiSeedAssignment[], rules?: Rule[] | null, seed?: string | null): Promise<AiSeedRuleOutcome>;
-  aiClassify(filePaths: string[], outputDir?: string | null): Promise<AiSeedClassifyOutcome>;
+  /**
+   * 调一次 AI 分类。
+   * `roots` = 这次拖入的源文件夹：核心据它读出「原文件夹已有的分类目录」当候选分类，
+   * AI 就在**你已经分好的目录结构上**继续分（用户要求 1）。
+   */
+  aiClassify(filePaths: string[], outputDir?: string | null, roots?: string[] | null): Promise<AiSeedClassifyOutcome>;
   /** AI 分类的分批进度 */
   onAiProgress(handler: (p: AiSeedProgress) => void): void;
   onProgress(handler: (p: OrganizeProgress) => void): void;

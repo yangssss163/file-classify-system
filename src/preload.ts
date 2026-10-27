@@ -5,6 +5,8 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   AiClassifyResult,
   AiStatus,
+  HistoryEntry,
+  SourceDeleteResult,
   CopySummary,
   OutputDirectionCheck,
   PreviewOutcome,
@@ -44,6 +46,12 @@ export interface AiRuleOutcome {
   checks: { source: string; category: string }[];
   message: string;
 }
+
+/** 历史里的一张单（界面只读）。 */
+export type HistoryEntryView = HistoryEntry;
+
+/** 删源文件的结果（人话 + 计数 + 逐条明细）。 */
+export type SourceDeleteResultView = SourceDeleteResult;
 
 /** 分批进度（AI 分类文件多的时候界面上要看得到走到哪儿了）。 */
 export interface AiProgress {
@@ -96,18 +104,42 @@ const api = {
    */
   setSourceRoots: (roots: string[] | null): Promise<boolean> =>
     ipcRenderer.invoke('files:setSourceRoots', { roots: roots ?? null }),
-  // 规则表跟着预览/整理一起传过去：界面用哪套规则，预览和执行就用哪套
+  /**
+   * 放下「这一次预览要用的显式分类」（AI 分好之后先看一遍时用），主进程只读地用一次就清掉。
+   * 单独一个入口的原因与 `setSourceRoots` 同：预览那条调用被验收钉着是三个参数。
+   */
+  setPreviewAssignments: (
+    assignments: readonly { source: string; category: string }[] | null,
+  ): Promise<boolean> =>
+    ipcRenderer.invoke('files:setPreviewAssignments', { assignments: assignments ?? null }),
+  // 规则表跟着预览/整理一起传过去：界面用哪套规则，预览和执行就用哪套。
+  // 第四个参数（可选）是「这次谁去哪个夹」的显式分类（AI 分完先看一遍时用）；不传就是纯按规则。
   preview: (
     files: string[],
     outputDir: string | null,
     rules?: Rule[] | null,
-  ): Promise<PreviewOutcome> => ipcRenderer.invoke('files:preview', { files, outputDir, rules: rules ?? null }),
+    assignments?: readonly { source: string; category: string }[] | null,
+  ): Promise<PreviewOutcome> =>
+    ipcRenderer.invoke('files:preview', {
+      files,
+      outputDir,
+      rules: rules ?? null,
+      assignments: assignments ?? null,
+    }),
   organize: (
     files: string[],
     outputDir: string,
     rules?: Rule[] | null,
     roots?: string[] | null,
-  ): Promise<CopySummary> => ipcRenderer.invoke('files:organize', { files, roots: roots ?? null, outputDir, rules: rules ?? null }),
+    assignments?: readonly { source: string; category: string }[] | null,
+  ): Promise<CopySummary> =>
+    ipcRenderer.invoke('files:organize', {
+      files,
+      roots: roots ?? null,
+      outputDir,
+      rules: rules ?? null,
+      assignments: assignments ?? null,
+    }),
   openPath: (dir: string): Promise<string> => ipcRenderer.invoke('shell:openPath', dir),
   /**
    * 上一次整理的记录（界面上那句「上一次整理：输出到 …，成功 N 个，可撤销」）：
@@ -116,6 +148,13 @@ const api = {
   lastRun: (): Promise<UndoSummary> => ipcRenderer.invoke('undo:lastRun'),
   /** 撤销上一次整理（只删记录里列出的目标路径；原文件一律不动）；幂等 */
   undoLastRun: (): Promise<UndoRunOutcome> => ipcRenderer.invoke('undo:run'),
+  /** 历史单号（每次分拣一张单，按时间倒序；读坏了就是空表，界面不会崩） */
+  historyList: (): Promise<HistoryEntryView[]> => ipcRenderer.invoke('history:list'),
+  /**
+   * 用户确认后删源文件：把这一次复制成功的那些源文件移到回收站，删空的源文件夹一并删掉。
+   * 只在「输出里那份还在」时才动；目录只 rmdir（空才成功），绝不递归。
+   */
+  deleteSources: (): Promise<SourceDeleteResultView> => ipcRenderer.invoke('files:deleteSources'),
   /** 开工前的输出方向校验（危险就不开工，一个字节都不写） */
   checkOutputDirection: (input: {
     roots?: string[] | null;
@@ -155,8 +194,19 @@ const api = {
   onAiProgress: (handler: (p: AiProgress) => void): void => {
     ipcRenderer.on('ai:progress', (_event, payload: AiProgress) => handler(payload));
   },
-  aiClassify: (filePaths: string[], outputDir?: string | null): Promise<AiClassifyResult> =>
-    ipcRenderer.invoke('ai:classify', { filePaths: filePaths ?? [], outputDir: outputDir ?? null }),
+  /**
+   * 调一次 AI 分类。
+   * @param filePaths 要分类的文件完整路径
+   * @param outputDir 本次输出根（只作上下文）
+   * @param roots 这次拖入/选中的源文件夹：核心据它读出「原文件夹已有的分类目录」当候选，
+   *   于是 AI 是在**你已经分好的结构上**继续分，而不是另起一套新名字。
+   */
+  aiClassify: (filePaths: string[], outputDir?: string | null, roots?: string[] | null): Promise<AiClassifyResult> =>
+    ipcRenderer.invoke('ai:classify', {
+      filePaths: filePaths ?? [],
+      outputDir: outputDir ?? null,
+      roots: roots ?? null,
+    }),
   // 规则读写：主进程写到 Electron 的 userData 目录下的一个 JSON 文件
   loadRules: (): Promise<RulesLoadResult> => ipcRenderer.invoke('rules:load'),
   saveRules: (rules: Rule[]): Promise<RulesSaveResult> => ipcRenderer.invoke('rules:save', rules),
